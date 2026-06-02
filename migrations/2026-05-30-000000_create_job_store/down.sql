@@ -1,0 +1,5 @@
+DROP TABLE IF EXISTS jobs;
+DROP FUNCTION IF EXISTS jobs_stamp_change();
+DROP SEQUENCE IF EXISTS jobs_change_seq;
+DROP TYPE IF EXISTS job_status;
+DROP FUNCTION IF EXISTS uuidv7();

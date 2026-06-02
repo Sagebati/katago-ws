@@ -1,0 +1,2 @@
+# Tests use `.unwrap()` on known-good fixtures; that's fine in test code.
+allow-unwrap-in-tests = true

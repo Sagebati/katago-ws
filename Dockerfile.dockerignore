@@ -1,0 +1,13 @@
+# Build context is the PARENT dir (contains katago-ws, muxa, pgmq).
+# Ignore everything, then re-include only the three crates we build from,
+# minus their heavy build/VCS artifacts.
+*
+
+!katago-ws
+!muxa
+!pgmq
+
+**/target
+**/.git
+**/*.log
+**/analysis_logs

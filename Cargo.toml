@@ -1,0 +1,93 @@
+[package]
+name = "katago-ws"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# muxa framework (local): web + diesel(async pg) + pgmq + otel + sentry + openapi
+# + diesel-migrations (MigrationsRunner runs the embedded migrations at startup).
+muxa = { path = "../muxa/crates/muxa", features = [
+    "web", "ratelimit", "diesel", "diesel-migrations", "diesel-sentry", "pgmq", "sentry", "openapi",
+    # OpenTelemetry: OTLP export over gRPC of traces (+ the tracing→OTel bridge),
+    # metrics, and logs. Endpoint configured via `[otel].endpoint`.
+    "otel", "otel-otlp-tonic", "otel-tracing-bridge", "otel-metrics", "otel-logs",
+] }
+# pgmq fork (local), same path muxa-pgmq depends on — one pgmq in the graph.
+# Used directly for the `Message`/`Queue` API in `queue.rs`.
+pgmq = { path = "../pgmq/pgmq-rs", default-features = false, features = ["diesel-async"] }
+# SGF parsing — used to build the KataGo move list + game metadata.
+sgf-parser = "2"
+
+# gRPC (tonic) for the orchestrator↔worker control plane (the `orchestrator` and
+# `worker` roles; see `src/cluster/`). Versions match the tonic/prost already
+# pulled in transitively by muxa's OTLP exporter, so the graph keeps ONE tonic +
+# prost build. In tonic 0.14 the prost codec lives in the separate `tonic-prost`
+# crate, and codegen moved to `tonic-prost-build` (a build-dependency, below).
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+
+# OpenAPI: aide comes through `muxa::aide` (the facade re-export) — no direct
+# dep. muxa-openapi enables the features we use (axum/axum-json/axum-query/macros),
+# and the `OperationIo` derive resolves its `aide::` paths via `use muxa::aide`.
+# schemars supplies the `JsonSchema` derive; async-stream powers the SSE handler.
+schemars = { version = "1", features = ["derive"] }
+async-stream = "0.3"
+
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "sync", "time"] }
+# `Stream` trait for the SSE response type; `sync` feature adds `ReceiverStream`,
+# used to bridge the orchestrator's per-worker job channel into a gRPC response stream.
+tokio-stream = { version = "0.1", features = ["sync"] }
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+diesel = { version = "2", default-features = false, features = ["postgres", "uuid", "chrono", "serde_json"] }
+diesel-async = { version = "0.9", default-features = false, features = ["postgres", "deadpool"] }
+# Maps the Postgres `job_status` enum to the Rust `JobStatus` enum (the `jobs`
+# view exposes status as this enum, not text).
+diesel-derive-enum = { version = "2", features = ["postgres"] }
+# Needed directly because `embed_migrations!()` expands to `diesel_migrations::`
+# paths in this crate; the version unifies with muxa-diesel's.
+diesel_migrations = "2"
+
+# Fast multi-threaded allocator.
+mimalloc = "0.1"
+
+# Time-ordered (v7) job ids are minted by Postgres (the `uuidv7()` DEFAULT), so
+# this crate is only needed for the `Uuid` type + serde — no client-side gen.
+uuid = { version = "1", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+tracing = "0.1"
+
+# Compiles `proto/cluster.proto` (build.rs). tonic 0.14 split prost codegen into
+# `tonic-prost-build`; it pulls `tonic-build` + `prost-build` and shells out to
+# the system `protoc`.
+[build-dependencies]
+tonic-prost-build = "0.14"
+
+# A curated subset of clippy's `restriction` group. The group as a whole is too
+# noisy to enforce (clippy itself recommends enabling these individually), so we
+# pick the genuinely useful ones. Only active under `cargo clippy`.
+[lints.clippy]
+# Panic safety (tests are exempted via clippy.toml's allow-unwrap-in-tests).
+unwrap_used = "warn"
+# No debug/placeholder leftovers; use `tracing`, not stdout/stderr.
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+exit = "warn"
+mem_forget = "warn"
+# Small correctness wins.
+lossy_float_literal = "warn"
+fn_to_numeric_cast_any = "warn"
+map_err_ignore = "warn"
+# Clarity / consistency.
+clone_on_ref_ptr = "warn"
+str_to_string = "warn"
+min_ident_chars = "warn"
+unused_trait_names = "warn"
+allow_attributes_without_reason = "warn"

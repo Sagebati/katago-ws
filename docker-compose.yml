@@ -1,0 +1,91 @@
+# One-command deploy: `docker compose up --build` (from this directory).
+# Brings up Postgres + the analyser. The image bundles a CPU KataGo + model,
+# so no GPU is required.
+name: katago-ws
+
+services:
+  db:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: goban
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d goban"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build:
+      # Parent dir so the local muxa/pgmq path-deps are in the build context.
+      context: ..
+      dockerfile: katago-ws/Dockerfile
+    environment:
+      MUXA_DIESEL__URL: postgres://postgres:postgres@db:5432/goban
+      RUST_LOG: info
+      # KataGo's official binary is an AppImage, which self-mounts via FUSE.
+      # The slim runtime container has no FUSE (/dev/fuse, fusermount), so the
+      # engine would exit instantly ("Cannot mount AppImage") and every job
+      # fails with "write to katago: Broken pipe". This makes the AppImage
+      # extract-and-run instead of mounting — the standard container fix.
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+      # Tune analysis strength/cost. Lowered to 10 so a full ~325-move game
+      # completes within the 600s engine timeout on this CPU build (100 visits
+      # times out). Raise (and bump MUXA_ENGINE__REQUEST_TIMEOUT_SECS) for
+      # stronger analysis.
+      MUXA_ENGINE__MAX_VISITS: "10"
+      # MUXA_WORKER__CONCURRENCY: "2"
+      # Error tracking (optional):
+      # MUXA_SENTRY__DSN: "https://...@sentry.io/..."
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Split deployment (alternative to the single `app` service above): one
+  # `orchestrator` that owns Postgres + the gRPC dispatcher, and N `worker`s that
+  # run KataGo and dial the orchestrator over gRPC (no Postgres access). Scale
+  # workers with `docker compose up --scale worker=4`. Comment out `app` and
+  # uncomment these to use the split topology. Same image, different first arg
+  # (the launch role).
+  # ───────────────────────────────────────────────────────────────────────────
+  # orchestrator:
+  #   build:
+  #     context: ..
+  #     dockerfile: katago-ws/Dockerfile
+  #   command: orchestrator            # role (appended to the ENTRYPOINT)
+  #   environment:
+  #     MUXA_DIESEL__URL: postgres://postgres:postgres@db:5432/goban
+  #     MUXA_ORCHESTRATOR__GRPC_LISTEN: "0.0.0.0:50051"
+  #     RUST_LOG: info
+  #   ports:
+  #     - "3000:3000"                  # public API
+  #   depends_on:
+  #     db:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+  #
+  # worker:
+  #   build:
+  #     context: ..
+  #     dockerfile: katago-ws/Dockerfile
+  #   command: worker
+  #   environment:
+  #     # No MUXA_DIESEL__URL — workers never reach Postgres; they only dial the
+  #     # orchestrator's gRPC port (service name resolves on the compose network).
+  #     MUXA_WORKER__ORCHESTRATOR_URL: "http://orchestrator:50051"
+  #     APPIMAGE_EXTRACT_AND_RUN: "1"  # see the `app` service note
+  #     MUXA_ENGINE__MAX_VISITS: "10"
+  #     RUST_LOG: info
+  #   depends_on:
+  #     - orchestrator
+  #   restart: unless-stopped
+
+volumes:
+  pgdata:

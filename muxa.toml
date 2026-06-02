@@ -1,0 +1,82 @@
+# katago-ws configuration.
+#
+# Loaded by muxa via figment: this file is merged with `MUXA_*` environment
+# variables (`__` = table nesting), e.g. MUXA_DIESEL__URL, MUXA_ENGINE__MODEL_PATH.
+# Secrets (diesel.url, sentry.dsn) should come from the environment in
+# production rather than being committed here.
+
+[web]
+host = "0.0.0.0"
+port = 3000
+
+[otel]
+service_name = "katago-ws"
+# OTLP/gRPC collector endpoint. Unset → export disabled (local dev needs no
+# collector). Point it at your collector to ship traces/metrics/logs, e.g.
+# MUXA_OTEL__ENDPOINT="http://otel-collector:4317".
+# endpoint = "http://localhost:4317"
+timeout_secs = 10
+metric_interval_secs = 60
+
+[sentry]
+# Leave dsn empty for local dev → Sentry runs as a no-op client.
+dsn = ""
+environment = "development"
+traces_sample_rate = 0.0
+
+[diesel]
+# Override with MUXA_DIESEL__URL in deployment.
+url = "postgres://postgres:postgres@localhost:5432/goban"
+max_connections = 10
+
+# The single pgmq queue ("analysis") is declared in code (queue::Queue) — no
+# [pgmq] section needed. The queue name is not configurable.
+
+[engine]
+# KataGo analysis engine. The service launches `katago analysis -config <config>
+# -model <model>` as a long-lived subprocess and drives it over JSON. These are
+# the local-dev paths (the container overrides them via MUXA_ENGINE__BINARY /
+# MUXA_ENGINE__CONFIG / MUXA_ENGINE__MODEL).
+binary = "katago"
+config = "analysis.cfg"
+model = "model.bin.gz"
+# Analysis tuning (max_visits, analysis_pv_len, include_ownership, top_k,
+# default_komi, default_board_size, request_timeout_secs) defaults to the values
+# in `src/config.rs`; override any of them here or via MUXA_ENGINE__* env vars.
+
+[ratelimit]
+# Per-IP rate limit on POST /analyse (the only endpoint that queues KataGo work).
+# In-memory, per instance — a coarse abuse guard, not a global cap (each replica
+# has its own buckets). GCRA quota: one submit allowance restored every
+# `period_ms`, up to `burst` at once → here, 1000 submits per IP per hour: one
+# allowance restored every 3.6s (3_600_000 / 1000), with up to 10 spendable at
+# once as a burst.
+enabled = true
+period_ms = 3600
+burst = 10
+# Trust X-Forwarded-For / X-Real-IP for the client IP. Enable ONLY behind a proxy
+# you control (otherwise clients spoof their IP). false → unspoofable peer IP
+# (which behind a proxy is the proxy's IP = one shared bucket).
+trust_forwarded_for = false
+
+# Launch role is the first CLI argument (NOT config): `katago-ws [standalone|
+# orchestrator|worker]`, default `standalone`. `standalone` = web + in-process
+# workers (one process). `orchestrator` = web + pgmq + gRPC dispatcher (no engine).
+# `worker` = KataGo + gRPC client dialing the orchestrator (no Postgres); /health only.
+
+[worker]
+# Consumer lease loops (standalone/orchestrator) AND the slots a worker advertises.
+concurrency = 2
+# Visibility timeout while a job is in flight (the worker heartbeats to extend
+# it). Below the config.rs default of 600 — the heartbeat re-arms it as needed.
+visibility_timeout_secs = 120
+# poll_secs and max_attempts default per src/config.rs.
+# `worker` role only — the orchestrator's gRPC endpoint to dial, and the backoff
+# between reconnect attempts. Override the URL via MUXA_WORKER__ORCHESTRATOR_URL.
+orchestrator_url = "http://127.0.0.1:50051"
+reconnect_backoff_secs = 3
+
+[orchestrator]
+# `orchestrator` role only — host:port the gRPC dispatcher binds (workers dial
+# this). Override via MUXA_ORCHESTRATOR__GRPC_LISTEN.
+grpc_listen = "0.0.0.0:50051"
