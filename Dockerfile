@@ -28,8 +28,10 @@ FROM rust:1-bookworm AS builder
 # pkg-config + libpq-dev let pq-sys (pulled transitively by diesel) link; the
 # binary doesn't actually call libpq (diesel-async is pure Rust), so it's
 # dropped at link via --as-needed and isn't needed at runtime.
+# protobuf-compiler provides `protoc`, needed at build time by tonic-prost-build
+# (build.rs) to compile proto/cluster.proto for the orchestrator/worker gRPC.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        pkg-config libpq-dev \
+        pkg-config libpq-dev protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -86,12 +88,17 @@ COPY katago-ws/muxa.toml             /app/muxa.toml
 WORKDIR /app
 USER app
 
+# KataGo ships as an AppImage; the slim runtime has no FUSE, so
+# APPIMAGE_EXTRACT_AND_RUN makes it extract-and-run instead of self-mounting
+# (else "Cannot mount AppImage"). Baked in so every engine role (standalone,
+# worker) works out of the box — no per-deploy env needed.
 ENV MUXA_CONFIG=/app/muxa.toml \
     MUXA_WEB__HOST=0.0.0.0 \
     MUXA_WEB__PORT=3000 \
     MUXA_ENGINE__BINARY=/opt/katago/katago \
     MUXA_ENGINE__CONFIG=/opt/katago/analysis.cfg \
     MUXA_ENGINE__MODEL=/opt/katago/model.bin.gz \
+    APPIMAGE_EXTRACT_AND_RUN=1 \
     RUST_LOG=info
 
 EXPOSE 3000

@@ -51,7 +51,7 @@ diesel-derive-enum = { version = "2", features = ["postgres"] }
 # paths in this crate; the version unifies with muxa-diesel's.
 diesel_migrations = "2"
 
-# Fast multi-threaded allocator.
+# Fast multithreaded allocator.
 mimalloc = "0.1"
 
 # Time-ordered (v7) job ids are minted by Postgres (the `uuidv7()` DEFAULT), so
@@ -91,3 +91,6 @@ str_to_string = "warn"
 min_ident_chars = "warn"
 unused_trait_names = "warn"
 allow_attributes_without_reason = "warn"
+# Nudge away from needless restricted visibility — prefer `pub` or private over a
+# redundant `pub(crate)`.
+redundant_pub_crate = "warn"

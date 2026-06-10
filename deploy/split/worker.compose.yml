@@ -1,0 +1,34 @@
+# ── WORKER HOST ──────────────────────────────────────────────────────────────
+# Runs on EACH worker machine: KataGo engine + gRPC client. No Postgres access.
+# It dials the orchestrator and processes pushed jobs. Disposable — if it dies
+# mid-job the orchestrator's pgmq lease lapses and the job is redelivered.
+#
+#   KATAGO_WS_IMAGE=registry.example.com/katago-ws:latest \
+#   ORCHESTRATOR_HOST=10.0.0.5 \
+#   docker compose -f worker.compose.yml up -d --scale worker=4
+#
+# `--scale worker=N` runs N engines on this host; or just run this file on more
+# machines. Each worker advertises MUXA_WORKER__CONCURRENCY slots.
+name: katago-ws-worker
+
+services:
+  worker:
+    image: ${KATAGO_WS_IMAGE:?set KATAGO_WS_IMAGE}
+    command: worker
+    environment:
+      # The orchestrator machine's address (private IP / DNS) + gRPC port. Must
+      # be reachable from here; nothing else (no DB).
+      MUXA_WORKER__ORCHESTRATOR_URL: "http://${ORCHESTRATOR_HOST:?set ORCHESTRATOR_HOST}:50051"
+      # Concurrent analyses this worker accepts (slots advertised to the orchestrator).
+      MUXA_WORKER__CONCURRENCY: "2"
+      MUXA_WORKER__RECONNECT_BACKOFF_SECS: "3"
+      # Workers do the heavy lifting — tune analysis strength per host's CPU/GPU.
+      MUXA_ENGINE__MAX_VISITS: "100"
+      MUXA_ENGINE__REQUEST_TIMEOUT_SECS: "600"
+      # APPIMAGE_EXTRACT_AND_RUN=1 is baked into the image (the bundled KataGo is
+      # an AppImage and the slim runtime has no FUSE), so no need to set it here.
+      RUST_LOG: info
+    restart: unless-stopped
+    # No published ports — the worker dials OUT. It serves /health on 3000
+    # internally; uncomment to expose a liveness probe:
+    # ports: ["3000:3000"]

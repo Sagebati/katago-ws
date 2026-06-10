@@ -48,12 +48,11 @@ services:
     restart: unless-stopped
 
   # ───────────────────────────────────────────────────────────────────────────
-  # Split deployment (alternative to the single `app` service above): one
-  # `orchestrator` that owns Postgres + the gRPC dispatcher, and N `worker`s that
-  # run KataGo and dial the orchestrator over gRPC (no Postgres access). Scale
-  # workers with `docker compose up --scale worker=4`. Comment out `app` and
-  # uncomment these to use the split topology. Same image, different first arg
-  # (the launch role).
+  # Split deployment on a SINGLE host (one orchestrator + N workers on the same
+  # compose network — workers reach it via compose DNS `http://orchestrator:50051`).
+  # For orchestrator and workers on SEPARATE MACHINES, use deploy/split/ instead
+  # (per-machine compose files + the network/security notes). Same image, the
+  # role is just the first CLI arg (the `command:`).
   # ───────────────────────────────────────────────────────────────────────────
   # orchestrator:
   #   build:

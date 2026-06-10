@@ -1,0 +1,50 @@
+{
+  // Cloudflare Containers deployment for katago-ws (the `standalone` role).
+  //
+  // A Worker fronts a single container that runs the Rust service: web API +
+  // in-process pgmq worker + KataGo engine. The container connects OUT to an
+  // external Postgres (Cloudflare doesn't host one) via the MUXA_DIESEL__URL
+  // secret. See README.md for build/push/deploy steps and the important caveats.
+  //
+  // `wrangler deploy` builds the image from the Dockerfile AND pushes it to the
+  // managed registry automatically — no manual docker build/push. Because the
+  // Dockerfile COPYs the sibling `muxa`/`pgmq` crates, `image_build_context`
+  // points at the repo's PARENT dir (scoped by katago-ws/Dockerfile.dockerignore).
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "katago-ws",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-01",
+
+  "containers": [
+    {
+      "class_name": "KatagoWs",
+      // Dockerfile path + build context, both relative to THIS file — so run
+      // `wrangler deploy` from this directory (deploy/cloudflare/). The context
+      // is the repo's parent (contains katago-ws, muxa, pgmq).
+      "image": "../../Dockerfile",
+      "image_build_context": "../../..",
+      // KataGo is CPU-heavy. standard-4 = 4 vCPU / 12 GiB / 20 GB disk (the max
+      // predefined). For a custom shape use:
+      //   "instance_type": { "vcpu": 4, "memory_mib": 12288, "disk_mb": 20000 }
+      "instance_type": "standard-4",
+      // Pinned to one instance (see src/index.ts): the in-process queue worker
+      // must run continuously, so we don't spread it across sleeping replicas.
+      "max_instances": 1
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [{ "name": "KATAGO_WS", "class_name": "KatagoWs" }]
+  },
+
+  // Container-enabled Durable Object — MUST be new_sqlite_classes.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["KatagoWs"] }],
+
+  // Keep-alive: ping the container so it doesn't sleep and the queue keeps
+  // draining even with no user traffic. (Trade-off: this makes the container
+  // effectively always-on — drop the cron if you'd rather scale to zero and
+  // only process while serving requests.)
+  "triggers": { "crons": ["*/5 * * * *"] },
+
+  "observability": { "enabled": true }
+}

@@ -2,3 +2,11 @@
 .idea/
 .ai/
 .junie/
+# Cloudflare deploy (Node/wrangler) artifacts
+node_modules/
+.wrangler/
+deploy/cloudflare/.dev.vars
+# Editor swap files
+*.kate-swp
+# Stray local scratch / personal data — never commit
+deploy/cloudflare/users

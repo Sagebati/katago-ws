@@ -1,0 +1,47 @@
+# Local single-host run of the split — Postgres + orchestrator + worker on ONE
+# compose network, for testing the orchestrator/worker wiring without separate
+# machines. The worker reaches the orchestrator by compose DNS.
+#
+#   KATAGO_WS_IMAGE=katago-ws-katagows:<tag> docker compose -f local.compose.yml up -d
+#
+# (For real separate machines use orchestrator.compose.yml + worker.compose.yml.)
+name: katago-ws-local
+
+services:
+  db:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: katago
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d katago"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  orchestrator:
+    image: ${KATAGO_WS_IMAGE:?set KATAGO_WS_IMAGE}
+    command: orchestrator
+    environment:
+      MUXA_DIESEL__URL: postgres://postgres:postgres@db:5432/katago
+      MUXA_ORCHESTRATOR__GRPC_LISTEN: "0.0.0.0:50051"
+      MUXA_WORKER__VISIBILITY_TIMEOUT_SECS: "60"
+      RUST_LOG: info
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    image: ${KATAGO_WS_IMAGE:?set KATAGO_WS_IMAGE}
+    command: worker
+    environment:
+      MUXA_WORKER__ORCHESTRATOR_URL: "http://orchestrator:50051"
+      MUXA_WORKER__CONCURRENCY: "1"
+      MUXA_ENGINE__MAX_VISITS: "8"
+      RUST_LOG: info
+      # (APPIMAGE_EXTRACT_AND_RUN is baked into the image — no need to set it.)
+    depends_on:
+      - orchestrator

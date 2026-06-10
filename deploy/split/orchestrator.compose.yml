@@ -1,0 +1,50 @@
+# ── ORCHESTRATOR HOST ────────────────────────────────────────────────────────
+# Runs on ONE machine: the public HTTP API + pgmq + the gRPC dispatcher, plus
+# Postgres. Worker machines dial this host's :50051 over gRPC.
+#
+#   KATAGO_WS_IMAGE=registry.example.com/katago-ws:latest \
+#   POSTGRES_PASSWORD=$(openssl rand -hex 16) \
+#   docker compose -f orchestrator.compose.yml up -d
+#
+# See README.md — especially the SECURITY note: :50051 is plaintext + unauthed,
+# so firewall it to the worker network (or run everything on a private VPC/VPN).
+name: katago-ws-orchestrator
+
+services:
+  db:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: katago
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d katago"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    # Postgres is intentionally NOT published — only the orchestrator (same host
+    # / compose network) reaches it. Workers never touch the DB.
+
+  orchestrator:
+    image: ${KATAGO_WS_IMAGE:?set KATAGO_WS_IMAGE (build+push the image first)}
+    command: orchestrator          # role = first CLI arg, appended to ENTRYPOINT
+    environment:
+      MUXA_DIESEL__URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/katago
+      MUXA_ORCHESTRATOR__GRPC_LISTEN: "0.0.0.0:50051"
+      # Consumer/dispatch knobs (apply to the orchestrator's lease loops):
+      MUXA_WORKER__VISIBILITY_TIMEOUT_SECS: "120"
+      MUXA_WORKER__MAX_ATTEMPTS: "3"
+      RUST_LOG: info
+    ports:
+      - "3000:3000"      # public HTTP API — put behind a TLS-terminating proxy/LB
+      - "50051:50051"    # gRPC dispatcher — FIREWALL to worker IPs only (see README)
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
