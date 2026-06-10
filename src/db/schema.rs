@@ -4,7 +4,10 @@
 /// SQL-side marker for the Postgres `job_status` enum. The Rust value type is
 /// [`crate::db::status::JobStatus`], mapped via `diesel-derive-enum`.
 pub mod sql_types {
-    #[derive(diesel::sql_types::SqlType)]
+    // `QueryId` (beyond `SqlType`) lets this enum be a query-cacheable bind, so a
+    // `SELECT`/`COUNT` can `.filter(status.eq(...))` — see `db::jobs_in_state` /
+    // `db::count_in_state`. Without it only `UPDATE … WHERE status = …` compiles.
+    #[derive(diesel::sql_types::SqlType, diesel::query_builder::QueryId)]
     #[diesel(postgres_type(name = "job_status"))]
     pub struct JobStatus;
 }

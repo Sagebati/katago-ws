@@ -33,9 +33,10 @@ pub struct ApiState {
 ///
 /// `ApiPlugin` finishes this into the axum router + the OpenAPI document and
 /// serves `/openapi.json` + `/docs`, so this only declares routes. The JSON
-/// endpoints use `api_route` (so they appear in the spec); `/analyses/stream`
-/// (SSE) and `/health` are plain routes — streaming responses aren't
-/// expressible as a JSON schema, so they're served but not documented.
+/// endpoints use `api_route` (so they appear in the spec); `/` (HTML landing
+/// page), `/analyses/stream` (SSE) and `/health` are plain routes — HTML and
+/// streaming responses aren't expressible as a JSON schema, so they're served
+/// but not documented.
 ///
 /// `POST /analyse` is the only expensive endpoint (it queues KataGo work), so
 /// it's the only one rate-limited — by client IP, via the muxa-web layer. It
@@ -87,6 +88,7 @@ pub fn api_router(state: ApiState, rl: &RateLimitConfig) -> Result<ApiRouter> {
                     .tag("cluster")
             }),
         )
+        .route("/", get(handlers::index))
         .route("/analyses/stream", get(handlers::stream))
         .route("/health", get(|| async { "ok" }))
         .with_state(state);

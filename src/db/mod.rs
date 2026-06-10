@@ -135,6 +135,38 @@ pub async fn list_jobs(pool: &DieselPool) -> AppResult<Vec<JobSummary>> {
     Ok(rows)
 }
 
+/// Up to `limit` jobs in a given lifecycle state, **oldest first**. Oldest-first
+/// is the queue's FIFO processing order, so for [`JobStatus::Queued`] the head of
+/// the result is the next job a worker will pick up — the "top of the queue".
+pub async fn jobs_in_state(
+    pool: &DieselPool,
+    status: JobStatus,
+    limit: i64,
+) -> AppResult<Vec<JobSummary>> {
+    let mut conn = pool.0.get().await.map_err(db_err)?;
+    let rows = jobs::table
+        .filter(jobs::status.eq(status))
+        .order(jobs::created_at.asc())
+        .limit(limit)
+        .select(JobSummary::as_select())
+        .load(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    Ok(rows)
+}
+
+/// Count of jobs currently in a given lifecycle state.
+pub async fn count_in_state(pool: &DieselPool, status: JobStatus) -> AppResult<i64> {
+    let mut conn = pool.0.get().await.map_err(db_err)?;
+    let total: i64 = jobs::table
+        .filter(jobs::status.eq(status))
+        .count()
+        .get_result(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    Ok(total)
+}
+
 /// Fetch a job's current state by id.
 pub async fn get_job(pool: &DieselPool, job_id: Uuid) -> AppResult<Option<Job>> {
     let mut conn = pool.0.get().await.map_err(db_err)?;
