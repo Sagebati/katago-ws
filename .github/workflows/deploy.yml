@@ -79,7 +79,7 @@ jobs:
       - name: Set up Node (wrangler + the Worker glue)
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22 # wrangler 4.x requires Node >= 22
 
       - name: Install Worker deps
         working-directory: katago-ws/deploy/cloudflare
