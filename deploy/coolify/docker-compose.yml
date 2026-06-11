@@ -1,0 +1,36 @@
+# katago-ws orchestrator for Coolify.
+#
+# Postgres is EXTERNAL (Supabase) — no DB service here. Coolify supplies the
+# domain + Let's Encrypt TLS in front of port 3000; workers then dial
+# wss://<your-domain>/cluster. See README.md for the Supabase URL + setup steps.
+#
+# In Coolify: create a "Docker Compose" resource from this file, set the
+# environment variables below as Coolify secrets, and assign your domain to the
+# `orchestrator` service on port 3000.
+services:
+  orchestrator:
+    image: ghcr.io/sagebati/katago-ws:latest
+    restart: unless-stopped
+    environment:
+      # Role selector (no CLI arg in a managed container → use the env var).
+      KATAGO_WS_ROLE: orchestrator
+      MUXA_WEB__HOST: "0.0.0.0"
+      MUXA_WEB__PORT: "3000"
+      MUXA_WEB__BANNER: "false"
+      # Supabase connection string — use the SESSION-mode pooler (port 5432 on
+      # …pooler.supabase.com): IPv4-friendly and safe for a persistent diesel
+      # pool. Do NOT use the transaction pooler (6543) — it breaks prepared
+      # statements. Set this as a Coolify SECRET, not in the file.
+      MUXA_DIESEL__URL: ${MUXA_DIESEL__URL}
+      # Shared secret a worker must present (Bearer) to open /cluster. Empty =
+      # auth DISABLED, and this socket is PUBLIC on the internet — set it.
+      MUXA_ORCHESTRATOR__AUTH_TOKEN: ${MUXA_ORCHESTRATOR__AUTH_TOKEN:-}
+      RUST_LOG: info
+    expose:
+      - "3000"
+    healthcheck:
+      # Busybox/glibc image has no curl; use the orchestrator's own /health via
+      # a tiny TCP check would need a tool — instead let Coolify health-check the
+      # HTTP domain. This block is a no-op placeholder you can enable if you add
+      # a probe tool to the image.
+      disable: true

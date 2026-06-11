@@ -1,0 +1,79 @@
+# Build the katago-ws image and push it to GitHub Container Registry (ghcr.io),
+# so a Coolify (or any) host can pull a ready image instead of building the
+# Dockerfile itself — which it can't, because the build needs the sibling `muxa`
+# + `pgmq` crates as a PARENT context (Coolify only clones one repo).
+#
+# Tags: ghcr.io/sagebati/katago-ws:latest and :<commit-sha>.
+#
+# Optional CD: set the repo secret COOLIFY_DEPLOY_HOOK to your Coolify resource's
+# deploy webhook URL and this pings it after each push, so Coolify pulls + rolls
+# the new image automatically.
+name: image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Free runner disk (image bundles KataGo + a model + a release build)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          df -h /
+
+      - name: Checkout katago-ws
+        uses: actions/checkout@v4
+        with:
+          path: katago-ws
+
+      - name: Checkout muxa (sibling build-context crate)
+        uses: actions/checkout@v4
+        with:
+          repository: Sagebati/muxa
+          ref: main
+          path: muxa
+
+      - name: Checkout pgmq fork (sibling crate, pinned to muxa's git rev)
+        uses: actions/checkout@v4
+        with:
+          repository: Sagebati/pgmq
+          ref: e243a26a60a0c3a43eefca2051156556715e875e
+          path: pgmq
+
+      - name: Scope the Docker build context
+        run: |
+          cat > "$GITHUB_WORKSPACE/.dockerignore" <<'EOF'
+          **/.git
+          **/target
+          **/node_modules
+          **/.wrangler
+          **/.idea
+          EOF
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: katago-ws/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/sagebati/katago-ws:latest
+            ghcr.io/sagebati/katago-ws:${{ github.sha }}
+
+      - name: Trigger Coolify redeploy (if a deploy hook is configured)
+        if: ${{ secrets.COOLIFY_DEPLOY_HOOK != '' }}
+        run: curl -fsSL -X POST "${{ secrets.COOLIFY_DEPLOY_HOOK }}"
