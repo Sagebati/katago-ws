@@ -75,5 +75,11 @@ jobs:
             ghcr.io/sagebati/katago-ws:${{ github.sha }}
 
       - name: Trigger Coolify redeploy (if a deploy hook is configured)
-        if: ${{ secrets.COOLIFY_DEPLOY_HOOK != '' }}
-        run: curl -fsSL -X POST "${{ secrets.COOLIFY_DEPLOY_HOOK }}"
+        env:
+          HOOK: ${{ secrets.COOLIFY_DEPLOY_HOOK }}
+        run: |
+          if [ -n "$HOOK" ]; then
+            curl -fsSL -X POST "$HOOK" && echo "pinged Coolify deploy hook"
+          else
+            echo "COOLIFY_DEPLOY_HOOK not set — skipping"
+          fi
