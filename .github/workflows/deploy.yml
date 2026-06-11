@@ -87,4 +87,7 @@ jobs:
 
       - name: Deploy (build + push image, then roll out the Worker)
         working-directory: katago-ws/deploy/cloudflare
-        run: npx wrangler deploy
+        # --containers-rollout=immediate replaces 100% of instances in one step
+        # (default is a staged 10%/90%); without it a warm, kept-alive instance
+        # can keep serving the old image after the Worker has already rolled.
+        run: npx wrangler deploy --containers-rollout=immediate
