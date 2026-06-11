@@ -2,6 +2,7 @@
 //! muxa's own plugins (`[web]`, `[otel]`, `[sentry]`, `[diesel]`, `[pgmq]`)
 //! own their sections.
 
+use secrecy::SecretString;
 use serde::Deserialize;
 
 fn default_binary() -> String {
@@ -88,7 +89,7 @@ fn default_max_attempts() -> i32 {
     3
 }
 fn default_orchestrator_url() -> String {
-    "http://127.0.0.1:50051".to_owned()
+    "ws://127.0.0.1:3000/cluster".to_owned()
 }
 fn default_reconnect_backoff() -> u64 {
     3
@@ -105,8 +106,8 @@ fn default_reconnect_backoff() -> u64 {
 ///   the slots a `worker` advertises to the orchestrator.
 /// - `visibility_timeout_secs` / `poll_secs` / `max_attempts` — the pgmq consumer
 ///   side (`standalone`/`orchestrator`); ignored by a `worker` (no DB).
-/// - `orchestrator_url` / `reconnect_backoff_secs` — the `worker` client; the
-///   gRPC endpoint to dial and how long to wait between reconnects.
+/// - `orchestrator_url` / `auth_token` / `reconnect_backoff_secs` — the `worker`
+///   client; the WebSocket URL to dial, the secret it presents, and the backoff.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct WorkerConfig {
@@ -118,8 +119,12 @@ pub struct WorkerConfig {
     pub poll_secs: u64,
     /// Max delivery attempts before a job is marked failed.
     pub max_attempts: i32,
-    /// `worker` role: gRPC endpoint of the orchestrator to dial.
+    /// `worker` role: WebSocket URL of the orchestrator's cluster socket
+    /// (e.g. `ws://orchestrator:3000/cluster`, or `wss://…/cluster` through TLS).
     pub orchestrator_url: String,
+    /// `worker` role: shared secret presented (as a Bearer token) on connect.
+    /// Must match the orchestrator's `[orchestrator].auth_token`; empty = none.
+    pub auth_token: SecretString,
     /// `worker` role: backoff (seconds) between reconnect attempts.
     pub reconnect_backoff_secs: u64,
 }
@@ -132,27 +137,28 @@ impl Default for WorkerConfig {
             poll_secs: default_poll(),
             max_attempts: default_max_attempts(),
             orchestrator_url: default_orchestrator_url(),
+            auth_token: SecretString::from(String::new()),
             reconnect_backoff_secs: default_reconnect_backoff(),
         }
     }
 }
 
-fn default_grpc_listen() -> String {
-    "0.0.0.0:50051".to_owned()
-}
-
-/// `[orchestrator]` — the gRPC dispatcher workers dial (the `orchestrator` role).
+/// `[orchestrator]` — the `orchestrator` role's cluster settings. The dispatcher
+/// is served on the web port at `/cluster` (no separate listen address), so the
+/// only knob is the worker-auth secret.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct OrchestratorConfig {
-    /// `host:port` the gRPC dispatcher binds (e.g. `0.0.0.0:50051`).
-    pub grpc_listen: String,
+    /// Shared secret a worker must present (Bearer) to open the cluster socket.
+    /// Empty disables auth — only safe on a trusted private network; set it
+    /// whenever the socket is publicly reachable (e.g. fronted by Cloudflare).
+    pub auth_token: SecretString,
 }
 
 impl Default for OrchestratorConfig {
     fn default() -> Self {
         Self {
-            grpc_listen: default_grpc_listen(),
+            auth_token: SecretString::from(String::new()),
         }
     }
 }

@@ -61,8 +61,9 @@ trust_forwarded_for = false
 
 # Launch role is the first CLI argument (NOT config): `katago-ws [standalone|
 # orchestrator|worker]`, default `standalone`. `standalone` = web + in-process
-# workers (one process). `orchestrator` = web + pgmq + gRPC dispatcher (no engine).
-# `worker` = KataGo + gRPC client dialing the orchestrator (no Postgres); /health only.
+# workers (one process). `orchestrator` = web + pgmq + the cluster WebSocket
+# dispatcher (served at `/cluster` on the web port; no engine). `worker` = KataGo +
+# WebSocket client dialing the orchestrator (no Postgres); serves /health only.
 
 [worker]
 # Consumer lease loops (standalone/orchestrator) AND the slots a worker advertises.
@@ -71,12 +72,16 @@ concurrency = 2
 # it). Below the config.rs default of 600 — the heartbeat re-arms it as needed.
 visibility_timeout_secs = 120
 # poll_secs and max_attempts default per src/config.rs.
-# `worker` role only — the orchestrator's gRPC endpoint to dial, and the backoff
-# between reconnect attempts. Override the URL via MUXA_WORKER__ORCHESTRATOR_URL.
-orchestrator_url = "http://127.0.0.1:50051"
+# `worker` role only — the orchestrator's cluster WebSocket URL to dial, the secret
+# it presents (must equal the orchestrator's auth_token), and the reconnect backoff.
+# Override via MUXA_WORKER__ORCHESTRATOR_URL / MUXA_WORKER__AUTH_TOKEN.
+orchestrator_url = "wss://katago-ws.samublaise.workers.dev/cluster"
+auth_token = ""
 reconnect_backoff_secs = 3
 
 [orchestrator]
-# `orchestrator` role only — host:port the gRPC dispatcher binds (workers dial
-# this). Override via MUXA_ORCHESTRATOR__GRPC_LISTEN.
-grpc_listen = "0.0.0.0:50051"
+# `orchestrator` role only — shared secret a worker must present (Bearer) to open
+# the cluster WebSocket (served at `/cluster` on the web port). Empty = auth
+# disabled (only safe on a trusted private network). ALWAYS set it (as a secret,
+# via MUXA_ORCHESTRATOR__AUTH_TOKEN) when the socket is publicly reachable.
+auth_token = ""

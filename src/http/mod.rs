@@ -8,6 +8,8 @@
 pub mod dto;
 pub mod handlers;
 
+use std::sync::Arc;
+
 use axum::routing::get;
 use muxa::Result;
 use muxa::aide::axum::ApiRouter;
@@ -17,6 +19,7 @@ use muxa::diesel::DieselPool;
 use muxa::web::ratelimit::{self, RateLimitConfig};
 
 use crate::cluster::registry::WorkerRegistry;
+use crate::cluster::server::ClusterDispatcher;
 
 /// Cloneable state shared with axum handlers (the Diesel pool is Arc-backed, so
 /// cloning is a cheap refcount bump).
@@ -27,6 +30,9 @@ pub struct ApiState {
     /// Registry of connected remote workers, in the `orchestrator` role. `None`
     /// in `standalone` (no remote workers) — `/workers` then reports an empty set.
     pub workers: Option<WorkerRegistry>,
+    /// Cluster dispatcher state, set only in the `orchestrator` role: it gates the
+    /// `/cluster` WebSocket and holds the worker-auth secret. `None` elsewhere.
+    pub cluster: Option<Arc<ClusterDispatcher>>,
 }
 
 /// Build the aide-documented API router with handler state applied.
@@ -81,7 +87,7 @@ pub fn api_router(state: ApiState, rl: &RateLimitConfig) -> Result<ApiRouter> {
             get_with(handlers::workers, |op| {
                 op.summary("List connected workers")
                     .description(
-                        "Workers currently holding a live gRPC session to this orchestrator. \
+                        "Workers currently holding a live WebSocket session to this orchestrator. \
                          In-memory and per-instance (each orchestrator replica sees only its \
                          own); empty in the standalone role.",
                     )
@@ -90,8 +96,18 @@ pub fn api_router(state: ApiState, rl: &RateLimitConfig) -> Result<ApiRouter> {
         )
         .route("/", get(handlers::index))
         .route("/analyses/stream", get(handlers::stream))
-        .route("/health", get(|| async { "ok" }))
-        .with_state(state);
+        .route("/health", get(|| async { "ok" }));
+
+    // Orchestrator role only: the worker control-plane WebSocket. Its auth (a
+    // shared Bearer token) is enforced inside the handler. Not an `api_route` — a
+    // WS upgrade isn't expressible in the OpenAPI schema.
+    let router = if state.cluster.is_some() {
+        router.route("/cluster", get(crate::cluster::server::cluster_ws))
+    } else {
+        router
+    };
+
+    let router = router.with_state(state);
     Ok(router)
 }
 

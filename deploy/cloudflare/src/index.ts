@@ -1,8 +1,15 @@
 // Worker entrypoint for the katago-ws Cloudflare Containers deployment.
 //
-// It owns one container instance (the Rust `standalone` service) and forwards
-// all HTTP to it. A Cron Trigger pings /health to keep the container awake so
-// the in-process pgmq worker keeps draining the queue between user requests.
+// It owns one container instance (the Rust `orchestrator` role) and forwards all
+// HTTP — and WebSocket upgrades — to it. The orchestrator runs the web API +
+// Postgres/pgmq + the cluster WebSocket dispatcher (at `/cluster` on port 3000),
+// but NO KataGo engine — it hands analysis to remote workers that connect over
+// that socket. A Cron Trigger pings /health to keep it awake.
+//
+// Workers reach the dispatcher at `wss://<this-worker>/cluster`: Container.fetch
+// proxies the WS upgrade to the container's port 3000, so no extra port is
+// exposed. The socket is authenticated by a shared Bearer token — set the
+// MUXA_CLUSTER_TOKEN secret, and the worker presents the same value.
 
 import { Container } from "@cloudflare/containers";
 
@@ -11,6 +18,7 @@ export interface Env {
   // Secrets — set with `wrangler secret put <NAME>`:
   MUXA_DATABASE_URL: string; // postgres://user:pass@host:5432/db  (must be reachable)
   MUXA_SENTRY__DSN?: string;
+  MUXA_CLUSTER_TOKEN?: string; // shared secret a worker presents to open /cluster
 }
 
 export class KatagoWs extends Container<Env> {
@@ -27,11 +35,15 @@ export class KatagoWs extends Container<Env> {
   // `this.env` (the Worker's vars/secrets) is set by the base constructor before
   // these field initializers run.
   envVars = {
+    // Launch role (read by Role::resolve() when no CLI arg is set, which is the
+    // case here — the image ENTRYPOINT is just `katago-ws`). Orchestrator = web +
+    // pgmq + gRPC dispatcher, no in-process engine.
+    KATAGO_WS_ROLE: "orchestrator",
     MUXA_WEB__HOST: "0.0.0.0",
     MUXA_WEB__PORT: "3000",
     MUXA_WEB__BANNER: "false",
-    // KataGo on <= 4 vCPU is slow — keep visits low so a full game fits the
-    // 600s engine timeout. Raise on beefier compute.
+    // Engine vars are inert in the orchestrator role (no KataGo here) — kept so a
+    // flip back to KATAGO_WS_ROLE=standalone needs no other change.
     MUXA_ENGINE__MAX_VISITS: "10",
     MUXA_ENGINE__REQUEST_TIMEOUT_SECS: "600",
     RUST_LOG: "info",
@@ -39,6 +51,11 @@ export class KatagoWs extends Container<Env> {
     // section). We expose it under the friendlier MUXA_DATABASE_URL secret and
     // pass it through to the container's expected name here.
     MUXA_DIESEL__URL: this.env.MUXA_DATABASE_URL,
+    // Cluster auth: the secret workers must present on /cluster. Omitted ⇒ auth
+    // disabled (insecure on a public endpoint — set MUXA_CLUSTER_TOKEN!).
+    ...(this.env.MUXA_CLUSTER_TOKEN
+      ? { MUXA_ORCHESTRATOR__AUTH_TOKEN: this.env.MUXA_CLUSTER_TOKEN }
+      : {}),
     ...(this.env.MUXA_SENTRY__DSN
       ? { MUXA_SENTRY__DSN: this.env.MUXA_SENTRY__DSN }
       : {}),
@@ -55,11 +72,12 @@ export class KatagoWs extends Container<Env> {
   }
 }
 
-// Single named instance: the `standalone` role runs one in-process queue worker,
-// so we pin all traffic + the keep-alive to the same container rather than
-// spreading across replicas that each sleep independently. To scale out, switch
-// to the orchestrator/worker split (separate deployment), not multiple of these.
-const INSTANCE = "main";
+// Single named instance: the orchestrator (gRPC dispatcher + DB/queue owner). All
+// HTTP + the keep-alive pin to it. The name is bumped from "main" because a warm,
+// cron-kept-alive instance resumes its OLD image across Cloudflare's gradual
+// rollout — changing the Durable Object key forces a fresh instance onto the new
+// image/role. (Bump again only if a future deploy gets stuck the same way.)
+const INSTANCE = "main-v3";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {

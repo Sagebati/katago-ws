@@ -27,11 +27,10 @@ FROM rust:1-bookworm AS builder
 
 # pkg-config + libpq-dev let pq-sys (pulled transitively by diesel) link; the
 # binary doesn't actually call libpq (diesel-async is pure Rust), so it's
-# dropped at link via --as-needed and isn't needed at runtime.
-# protobuf-compiler provides `protoc`, needed at build time by tonic-prost-build
-# (build.rs) to compile proto/cluster.proto for the orchestrator/worker gRPC.
+# dropped at link via --as-needed and isn't needed at runtime. (The cluster
+# control plane is plain WebSocket now — no protoc/codegen needed.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        pkg-config libpq-dev protobuf-compiler \
+        pkg-config libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build

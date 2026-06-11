@@ -18,14 +18,17 @@ pgmq = { path = "../pgmq/pgmq-rs", default-features = false, features = ["diesel
 # SGF parsing — used to build the KataGo move list + game metadata.
 sgf-parser = "2"
 
-# gRPC (tonic) for the orchestrator↔worker control plane (the `orchestrator` and
-# `worker` roles; see `src/cluster/`). Versions match the tonic/prost already
-# pulled in transitively by muxa's OTLP exporter, so the graph keeps ONE tonic +
-# prost build. In tonic 0.14 the prost codec lives in the separate `tonic-prost`
-# crate, and codegen moved to `tonic-prost-build` (a build-dependency, below).
-tonic = "0.14"
-tonic-prost = "0.14"
-prost = "0.14"
+# Orchestrator↔worker control plane over WebSocket (the `orchestrator` and
+# `worker` roles; see `src/cluster/`). The orchestrator serves the socket on its
+# existing axum web server (axum's `ws` feature); a worker dials it with
+# `tokio-tungstenite` (rustls + bundled webpki roots, so `wss://` works behind a
+# TLS terminator like Cloudflare with no system OpenSSL). `rustls` is a direct dep
+# only to install a process-default crypto provider at worker startup.
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+rustls = "0.23"
+futures-util = "0.3"
+# Shared-secret auth token for the (now public) cluster socket — kept redacted.
+secrecy = { version = "0.10", features = ["serde"] }
 
 # OpenAPI: aide comes through `muxa::aide` (the facade re-export) — no direct
 # dep. muxa-openapi enables the features we use (axum/axum-json/axum-query/macros),
@@ -35,10 +38,10 @@ schemars = { version = "1", features = ["derive"] }
 async-stream = "0.3"
 
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "sync", "time"] }
-# `Stream` trait for the SSE response type; `sync` feature adds `ReceiverStream`,
-# used to bridge the orchestrator's per-worker job channel into a gRPC response stream.
+# `Stream` trait for the SSE response type; `sync` adds `ReceiverStream`, used to
+# bridge the orchestrator's per-worker job channel into the WebSocket writer.
 tokio-stream = { version = "0.1", features = ["sync"] }
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -60,12 +63,6 @@ uuid = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 tracing = "0.1"
-
-# Compiles `proto/cluster.proto` (build.rs). tonic 0.14 split prost codegen into
-# `tonic-prost-build`; it pulls `tonic-build` + `prost-build` and shells out to
-# the system `protoc`.
-[build-dependencies]
-tonic-prost-build = "0.14"
 
 # A curated subset of clippy's `restriction` group. The group as a whole is too
 # noisy to enforce (clippy itself recommends enabling these individually), so we

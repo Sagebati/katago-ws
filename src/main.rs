@@ -5,7 +5,7 @@
 //! and stores the annotated result. `GET /analyse/{id}` returns status and, once
 //! done, the analysis.
 //!
-//! ## Launch roles (first CLI argument; default `standalone`)
+//! ## Launch roles (first CLI argument, or `KATAGO_WS_ROLE` env; default `standalone`)
 //!
 //! - `standalone` — one process does everything: web API + in-process workers,
 //!   sharing Postgres/pgmq. The original single-binary deployment.
@@ -27,7 +27,6 @@ mod http;
 mod queue;
 mod worker;
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use muxa::prelude::*;
@@ -55,9 +54,15 @@ enum Role {
 }
 
 impl Role {
-    /// Parse the role from the first CLI argument (absent ⇒ [`Role::Standalone`]).
-    fn from_args() -> Result<Self, String> {
-        match std::env::args().nth(1).as_deref() {
+    /// Resolve the launch role: the first CLI argument wins; if it's absent, the
+    /// `KATAGO_WS_ROLE` environment variable is consulted (handy where setting
+    /// argv is awkward — e.g. a Cloudflare Container, whose command is fixed by
+    /// the image `ENTRYPOINT`); if neither is set, [`Role::Standalone`].
+    fn resolve() -> Result<Self, String> {
+        let raw = std::env::args()
+            .nth(1)
+            .or_else(|| std::env::var("KATAGO_WS_ROLE").ok());
+        match raw.as_deref() {
             None | Some("standalone") => Ok(Self::Standalone),
             Some("orchestrator") => Ok(Self::Orchestrator),
             Some("worker") => Ok(Self::Worker),
@@ -70,7 +75,7 @@ impl Role {
 
 #[tokio::main]
 async fn main() -> muxa::Result<()> {
-    let role = Role::from_args().map_err(Error::other)?;
+    let role = Role::resolve().map_err(Error::other)?;
     tracing::info!(?role, "starting katago-ws");
     match role {
         Role::Standalone => run_standalone().await,
@@ -104,8 +109,9 @@ async fn run_standalone() -> muxa::Result<()> {
     worker::register(app.ctx_mut(), db.clone(), engine, worker_cfg);
 
     // No remote workers in this role (the engine runs in-process), so `/workers`
-    // has nothing to list.
-    serve_api(app, db, &rl_cfg, None).await
+    // is empty and the `/cluster` socket isn't mounted.
+    let api = http::ApiState { db, workers: None, cluster: None };
+    serve_api(app, api, &rl_cfg).await
 }
 
 /// `orchestrator`: web API + pgmq + the gRPC dispatcher; no engine. Owns the DB
@@ -125,15 +131,22 @@ async fn run_orchestrator() -> muxa::Result<()> {
     let worker_cfg = extract::<WorkerConfig>(&app, "worker");
     let orch_cfg = extract::<OrchestratorConfig>(&app, "orchestrator");
     let rl_cfg = extract::<RateLimitConfig>(&app, "ratelimit");
-    let listen: SocketAddr = orch_cfg.grpc_listen.parse().map_err(Error::other)?;
+    // Connection lifetimes derive from the app-wide shutdown token.
+    let shutdown = app.ctx().shutdown.clone();
 
     let mut app = app;
-    // The dispatcher records each connected worker here; the `/workers` endpoint
-    // reads the same registry.
+    // The dispatcher records each connected worker here; `/workers` reads it too.
     let registry = cluster::registry::WorkerRegistry::spawn(app.ctx_mut());
-    cluster::server::register_server(app.ctx_mut(), db.clone(), worker_cfg, listen, registry.clone());
 
-    serve_api(app, db, &rl_cfg, Some(registry)).await
+    // The cluster socket rides the web router (`GET /cluster`); set the dispatcher
+    // state so `api_router` mounts it and the handler can auth + dispatch jobs.
+    let dispatcher = cluster::server::ClusterDispatcher::new(worker_cfg, orch_cfg.auth_token, shutdown);
+    let api = http::ApiState {
+        db,
+        workers: Some(registry),
+        cluster: Some(Arc::new(dispatcher)),
+    };
+    serve_api(app, api, &rl_cfg).await
 }
 
 /// `worker`: KataGo engine + gRPC client dialing the orchestrator; no Postgres.
@@ -164,11 +177,9 @@ async fn run_worker() -> muxa::Result<()> {
 /// owns the serve loop.
 async fn serve_api<S: State>(
     app: AppBuilder<S>,
-    db: DieselPool,
+    api: http::ApiState,
     rl_cfg: &RateLimitConfig,
-    workers: Option<cluster::registry::WorkerRegistry>,
 ) -> muxa::Result<()> {
-    let api = http::ApiState { db, workers };
     let router = http::api_router(api, rl_cfg)?;
     app.with_plugin(ApiPlugin::new(http::api_fn(router), http::openapi_seed()))
         .await?

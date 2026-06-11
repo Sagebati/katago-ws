@@ -1,10 +1,9 @@
-//! Worker-side gRPC client, modelled as an explicit state machine.
+//! Worker-side cluster client, modelled as an explicit state machine.
 //!
-//! A worker runs KataGo but has no Postgres access, so it dials the orchestrator
-//! and opens one long-lived `Session` stream: it announces its capacity
-//! (`Hello{slots}`), then runs each pushed [`JobRequest`](super::proto::JobRequest)
-//! through the local engine and streams back a
-//! [`JobResult`](super::proto::JobResult).
+//! A worker runs KataGo but has no Postgres access, so it dials the orchestrator's
+//! WebSocket and opens one long-lived session: it announces its capacity
+//! ([`ClientMsg::Hello`]), then runs each pushed [`JobRequest`] through the local
+//! engine and sends back a [`ClientMsg::Result`].
 //!
 //! The lifecycle is a [`State`] machine driven by [`WorkerClient::event_loop`]:
 //!
@@ -12,7 +11,7 @@
 //!            ┌──────────────┐  dial ok   ┌──────────┐
 //!  start ──▶ │  Connecting  │ ─────────▶ │ Serving  │
 //!            └──────────────┘            └──────────┘
-//!              ▲   │ dial err               │  stream closed / error
+//!              ▲   │ dial err               │  socket closed / error
 //!     sleep ok │   ▼                        ▼
 //!            ┌──────────────┐ ◀────────────────────┘
 //!            │   Backoff    │
@@ -23,25 +22,36 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::{SinkExt as _, StreamExt as _};
 use muxa::prelude::*;
+use secrecy::ExposeSecret as _;
+use tokio::net::TcpStream;
 use tokio::sync::{Semaphore, mpsc};
-use tokio_stream::wrappers::ReceiverStream;
-use tonic::Streaming;
-use tonic::transport::Channel;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+use tokio_tungstenite::tungstenite::http;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
-use crate::cluster::proto::cluster_client::ClusterClient;
-use crate::cluster::proto::{Hello, JobRequest, JobResult, WorkerMsg, job_result, worker_msg};
+use crate::cluster::message::{ClientMsg, JobRequest, Outcome};
 use crate::config::WorkerConfig;
 use crate::engine::AnalysisEngine;
 
-/// Boxed error unifying the connect (`transport::Error`), Hello-send, and stream
-/// (`Status`) failures a dial can hit; all are handled by entering `Backoff`.
+/// The connected WebSocket transport (plaintext `ws://` or TLS `wss://`).
+type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+/// Boxed error unifying the connect, handshake, header, and send failures a dial
+/// can hit; all are handled by entering `Backoff`.
 type SessionError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Mount the worker client as a background task bound to the app's shutdown token.
 pub fn register_client(ctx: &mut BuildCtx, engine: Arc<AnalysisEngine>, cfg: WorkerConfig) {
+    // tokio-tungstenite's rustls connector needs a process-default crypto provider
+    // for `wss://`; the dep graph carries both aws-lc-rs and ring, so install one
+    // explicitly (idempotent — ignore the "already installed" error).
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     ctx.tasks
-        .spawn("cluster-grpc-client", move |shutdown| async move {
+        .spawn("cluster-ws-client", move |shutdown| async move {
             WorkerClient::new(engine, cfg, shutdown).event_loop().await;
         });
 }
@@ -54,8 +64,8 @@ struct WorkerClient {
     slots: u32,
     /// Wait between a failed/closed session and the next dial.
     backoff: Duration,
-    /// Caps in-flight analyses at `slots` (the orchestrator already respects
-    /// this; the semaphore is a local safety net, shared across reconnects).
+    /// Caps in-flight analyses at `slots` (a local safety net shared across
+    /// reconnects; the orchestrator already respects the advertised slots).
     limiter: Arc<Semaphore>,
     shutdown: ShutdownToken,
 }
@@ -65,7 +75,7 @@ struct WorkerClient {
 enum State {
     /// Dial the orchestrator and open the session.
     Connecting,
-    /// Stream open: service pushed jobs until it ends. Boxed so the open streams
+    /// Session open: service pushed jobs until it ends. Boxed so the open streams
     /// don't bloat the (otherwise unit-sized) other states.
     Serving(Box<Session>),
     /// Wait out the reconnect backoff, then redial.
@@ -74,15 +84,17 @@ enum State {
     Stopped,
 }
 
-/// An established session — the open streams for one connection.
+/// An established session — the split socket plus the outbound result channel.
 struct Session {
-    /// Held to keep the gRPC channel alive for the session's lifetime.
-    #[allow(dead_code, reason = "owns the channel handle while the streams are live")]
-    client: ClusterClient<Channel>,
-    /// Server→worker: pushed job requests.
-    inbound: Streaming<JobRequest>,
-    /// Worker→server sink: the Hello (already sent) then one result per job.
-    outbound: mpsc::Sender<WorkerMsg>,
+    /// Worker→orchestrator sink.
+    sink: SplitSink<WsStream, Message>,
+    /// Orchestrator→worker stream of pushed jobs.
+    stream: SplitStream<WsStream>,
+    /// Finished analyses post their [`ClientMsg::Result`] here; the serving loop
+    /// drains it to the sink.
+    out_tx: mpsc::Sender<ClientMsg>,
+    /// Receiver half drained by the serving loop.
+    out_rx: mpsc::Receiver<ClientMsg>,
 }
 
 impl WorkerClient {
@@ -126,20 +138,34 @@ impl WorkerClient {
         }
     }
 
-    /// `Serving`: pull events off the session — a pushed job, the stream ending,
-    /// or shutdown — until one moves us out of this state.
-    async fn on_serving(&self, mut session: Box<Session>) -> State {
+    /// `Serving`: drive the single I/O loop — send finished results, receive pushed
+    /// jobs, answer pings — until the socket ends or shutdown.
+    async fn on_serving(&self, session: Box<Session>) -> State {
+        let Session { mut sink, mut stream, out_tx, mut out_rx } = *session;
         loop {
             tokio::select! {
                 () = self.shutdown.cancelled() => return State::Stopped,
-                message = session.inbound.message() => match message {
-                    Ok(Some(job)) => self.dispatch(job, &session.outbound).await,
-                    Ok(None) => {
-                        tracing::info!("orchestrator closed the stream; backing off");
+                outbound = out_rx.recv() => {
+                    if let Some(message) = outbound {
+                        let Ok(text) = serde_json::to_string(&message) else { continue };
+                        if sink.send(Message::Text(text.into())).await.is_err() {
+                            return State::Backoff;
+                        }
+                    }
+                }
+                inbound = stream.next() => match inbound {
+                    Some(Ok(Message::Text(text))) => match serde_json::from_str::<JobRequest>(&text) {
+                        Ok(job) => self.dispatch(job, &out_tx).await,
+                        Err(err) => tracing::warn!(%err, "orchestrator sent an unparseable job"),
+                    },
+                    Some(Ok(Message::Ping(payload))) => drop(sink.send(Message::Pong(payload)).await),
+                    Some(Ok(Message::Close(_))) | None => {
+                        tracing::info!("orchestrator closed the socket; backing off");
                         return State::Backoff;
                     }
-                    Err(status) => {
-                        tracing::warn!(%status, "session stream error; backing off");
+                    Some(Ok(_)) => {} // pong / binary — ignore
+                    Some(Err(err)) => {
+                        tracing::warn!(%err, "session socket error; backing off");
                         return State::Backoff;
                     }
                 },
@@ -155,55 +181,52 @@ impl WorkerClient {
         }
     }
 
-    /// Dial the orchestrator, announce capacity, and open the bidi session.
+    /// Dial the orchestrator (with the auth header), announce capacity, and open
+    /// the session.
     async fn dial(&self) -> Result<Session, SessionError> {
-        let mut client = ClusterClient::connect(self.cfg.orchestrator_url.clone()).await?;
-        // Outbound: Hello first, then one JobResult per finished job.
-        let (outbound, out_rx) = mpsc::channel::<WorkerMsg>(self.slots as usize + 1);
-        outbound
-            .send(WorkerMsg {
-                kind: Some(worker_msg::Kind::Hello(Hello { slots: self.slots })),
-            })
-            .await?;
-        let response = client.session(ReceiverStream::new(out_rx)).await?;
-        Ok(Session {
-            client,
-            inbound: response.into_inner(),
-            outbound,
-        })
+        let mut request = self.cfg.orchestrator_url.as_str().into_client_request()?;
+        let token = self.cfg.auth_token.expose_secret();
+        if !token.is_empty() {
+            let value = format!("Bearer {token}").parse::<http::HeaderValue>()?;
+            request.headers_mut().insert(http::header::AUTHORIZATION, value);
+        }
+
+        let (socket, _response) = connect_async(request).await?;
+        let (mut sink, stream) = socket.split();
+
+        // Hello first, before any job can arrive.
+        let hello = serde_json::to_string(&ClientMsg::Hello { slots: self.slots })?;
+        sink.send(Message::Text(hello.into())).await?;
+
+        let (out_tx, out_rx) = mpsc::channel::<ClientMsg>(self.slots as usize + 1);
+        Ok(Session { sink, stream, out_tx, out_rx })
     }
 
-    /// Accept one job: take a slot (back-pressuring the inbound read), then run
-    /// the analysis off-loop and stream the result back.
-    async fn dispatch(&self, job: JobRequest, outbound: &mpsc::Sender<WorkerMsg>) {
-        // Wait for a free slot before reading more work off the stream.
+    /// Accept one job: take a slot (back-pressuring the inbound read), then run the
+    /// analysis off-loop and post the result to the outbound channel.
+    async fn dispatch(&self, job: JobRequest, out_tx: &mpsc::Sender<ClientMsg>) {
         let Ok(permit) = Arc::clone(&self.limiter).acquire_owned().await else {
             return; // semaphore closed — only on shutdown teardown
         };
         let engine = Arc::clone(&self.engine);
-        let outbound = outbound.clone();
+        let out_tx = out_tx.clone();
         tokio::spawn(async move {
             let _permit = permit; // released when the analysis finishes
             let outcome = Self::run_job(&engine, &job.sgf).await;
-            let reply = WorkerMsg {
-                kind: Some(worker_msg::Kind::Result(JobResult {
-                    job_id: job.job_id,
-                    outcome: Some(outcome),
-                })),
-            };
+            let reply = ClientMsg::Result { job_id: job.job_id, outcome };
             // Best-effort: if the session is gone, the pgmq lease redelivers.
-            let _ = outbound.send(reply).await;
+            drop(out_tx.send(reply).await);
         });
     }
 
     /// Run one job through the local engine, mapping the result into the wire form.
-    async fn run_job(engine: &AnalysisEngine, sgf: &str) -> job_result::Outcome {
+    async fn run_job(engine: &AnalysisEngine, sgf: &str) -> Outcome {
         match engine.analyze(sgf).await {
-            Ok(analysis) => match serde_json::to_string(&analysis) {
-                Ok(json) => job_result::Outcome::AnalysisJson(json),
-                Err(err) => job_result::Outcome::Error(format!("serialize analysis: {err}")),
+            Ok(analysis) => match serde_json::to_value(&analysis) {
+                Ok(value) => Outcome::Ok(value),
+                Err(err) => Outcome::Err(format!("serialize analysis: {err}")),
             },
-            Err(err) => job_result::Outcome::Error(err.to_string()),
+            Err(err) => Outcome::Err(err.to_string()),
         }
     }
 }

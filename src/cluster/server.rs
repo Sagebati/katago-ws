@@ -1,212 +1,228 @@
-//! Orchestrator-side gRPC dispatcher.
+//! Orchestrator-side dispatcher — an axum WebSocket handler.
 //!
-//! Implements the [`Cluster`](super::proto::cluster_server::Cluster) service.
-//! Each connected worker opens one `Session` stream and announces its capacity
-//! (`Hello{slots}`). The orchestrator then drives `slots` copies of
-//! [`crate::worker::worker_loop`] for that connection, each leasing one pgmq job
-//! and dispatching it to the worker via a [`RemoteExecutor`] — so the queue
-//! lease, heartbeat, DB writes and redelivery semantics are exactly the local
-//! path's, with the analysis itself shipped over the stream.
+//! Mounted on the orchestrator's own web server at `GET /cluster` (so it shares
+//! the HTTP port and a TLS terminator like Cloudflare can front it). Each worker
+//! opens one socket and announces its capacity ([`ClientMsg::Hello`]); the
+//! orchestrator then drives `slots` copies of [`crate::worker::worker_loop`] for
+//! that connection, each leasing one pgmq job and dispatching it to the worker via
+//! a [`RemoteExecutor`] — so the queue lease, heartbeat, DB writes and redelivery
+//! are exactly the local path's, with the analysis itself shipped over the socket.
 //!
 //! Backpressure is implicit: a loop won't lease its next job until the current
-//! one's result comes back, so a worker never has more than `slots` jobs in
-//! flight. A dropped stream cancels that connection's loops and fails their
-//! in-flight jobs, which the heartbeat-less pgmq lease then redelivers.
+//! one's result returns, so a worker never has more than `slots` jobs in flight. A
+//! dropped socket cancels that connection's loops and fails their in-flight jobs,
+//! which the heartbeat-less pgmq lease then redelivers.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::extract::State;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse as _, Response};
+use futures_util::stream::SplitStream;
+use futures_util::{SinkExt as _, StreamExt as _};
 use muxa::diesel::DieselPool;
 use muxa::prelude::*;
+use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::Value as Json;
 use tokio::sync::{Mutex, mpsc, oneshot};
-use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::Server;
-use tonic::{Request, Response, Status, Streaming};
 use uuid::Uuid;
 
-use crate::cluster::proto::cluster_server::{Cluster, ClusterServer};
-use crate::cluster::proto::{JobRequest, JobResult, WorkerMsg, job_result, worker_msg};
-use crate::cluster::registry::{WorkerGuard, WorkerRegistry};
+use crate::cluster::message::{ClientMsg, JobRequest, Outcome};
+use crate::cluster::registry::WorkerRegistry;
 use crate::config::WorkerConfig;
 use crate::error::{AppError, AppResult};
+use crate::http::ApiState;
 use crate::worker::{Executor, worker_loop};
 
-/// Upper bound on the slots a single worker may advertise — a sanity clamp so a
+/// Upper bound on the slots one worker may advertise — a sanity clamp so a
 /// misbehaving client can't make us spawn an unbounded number of lease loops.
 const MAX_SLOTS: u32 = 64;
 
-/// Channel of pending in-flight jobs for one connection: `job_id` → the sender
-/// that delivers that job's outcome back to the waiting [`RemoteExecutor`].
+/// Per-connection map of in-flight jobs: `job_id` → the sender that delivers that
+/// job's outcome back to the waiting [`RemoteExecutor`].
 type Pending = Arc<Mutex<HashMap<Uuid, oneshot::Sender<Result<Json, String>>>>>;
 
-/// Mount the gRPC dispatcher as a background task bound to the app's shutdown
-/// token. Serves `proto::cluster::Cluster` on `listen` until shutdown.
-pub fn register_server(
-    ctx: &mut BuildCtx,
-    db: DieselPool,
+/// Orchestrator-only state the cluster socket handler needs, held behind an `Arc`
+/// in [`ApiState`] so the (cloneable) state can carry a non-`Clone` secret.
+pub struct ClusterDispatcher {
+    /// Consumer config (concurrency/visibility/poll/max_attempts) for the loops.
     cfg: WorkerConfig,
-    listen: SocketAddr,
-    registry: WorkerRegistry,
-) {
-    // Derive connection lifetimes from the app-wide shutdown token, so a global
-    // shutdown both stops `serve` and cancels every live worker connection.
-    let shutdown = ctx.shutdown.clone();
-    let service = ClusterService { db, cfg, shutdown: shutdown.clone(), registry };
-
-    ctx.tasks.spawn("cluster-grpc-server", move |_task| async move {
-        tracing::info!(%listen, "cluster gRPC dispatcher listening");
-        let serve_shutdown = shutdown.clone();
-        let result = Server::builder()
-            .add_service(ClusterServer::new(service))
-            .serve_with_shutdown(listen, async move { serve_shutdown.cancelled().await })
-            .await;
-        if let Err(err) = result {
-            tracing::error!(error = %err, "cluster gRPC dispatcher failed");
-        } else {
-            tracing::info!("cluster gRPC dispatcher stopped");
-        }
-    });
+    /// Secret a worker must present (Bearer). Empty ⇒ auth disabled.
+    token: SecretString,
+    /// App-wide shutdown; each connection derives a child token from it.
+    shutdown: ShutdownToken,
 }
 
-/// The dispatcher service: shares the Diesel pool (queue + result writes) and
-/// the consumer config across all worker connections.
-struct ClusterService {
+impl ClusterDispatcher {
+    /// Build the dispatcher state for the `orchestrator` role.
+    pub fn new(cfg: WorkerConfig, token: SecretString, shutdown: ShutdownToken) -> Self {
+        Self { cfg, token, shutdown }
+    }
+
+    /// Whether the request carries the expected `Authorization: Bearer <token>`
+    /// (constant-time compared). When no token is configured, auth is disabled.
+    fn authorized(&self, headers: &HeaderMap) -> bool {
+        let expected = self.token.expose_secret();
+        if expected.is_empty() {
+            return true;
+        }
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .is_some_and(|presented| tokens_match(presented, expected))
+    }
+}
+
+/// Length-checked constant-time token comparison (avoids leaking match length via
+/// early return on the byte loop).
+fn tokens_match(presented: &str, expected: &str) -> bool {
+    let (presented, expected) = (presented.as_bytes(), expected.as_bytes());
+    if presented.len() != expected.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (left, right) in presented.iter().zip(expected) {
+        diff |= left ^ right;
+    }
+    diff == 0
+}
+
+/// `GET /cluster` — upgrade a worker's connection to the cluster WebSocket.
+///
+/// Only mounted in the `orchestrator` role (where `ApiState.cluster` is set).
+/// Rejects the upgrade with 401 if the Bearer token is missing/wrong.
+pub async fn cluster_ws(State(api): State<ApiState>, headers: HeaderMap, upgrade: WebSocketUpgrade) -> Response {
+    let (Some(dispatcher), Some(registry)) = (api.cluster.as_ref(), api.workers.as_ref()) else {
+        return (StatusCode::NOT_FOUND, "cluster socket not enabled").into_response();
+    };
+    if !dispatcher.authorized(&headers) {
+        return (StatusCode::UNAUTHORIZED, "missing or invalid cluster token").into_response();
+    }
+    let db = api.db.clone();
+    let registry = registry.clone();
+    let cfg = dispatcher.cfg.clone();
+    let shutdown = dispatcher.shutdown.clone();
+    upgrade.on_upgrade(move |socket| run_session(socket, db, registry, cfg, shutdown))
+}
+
+/// Drive one worker connection: read its `Hello`, run `slots` lease loops that
+/// push jobs over the socket, and route results back — until the socket closes or
+/// the app shuts down.
+async fn run_session(
+    socket: WebSocket,
     db: DieselPool,
+    registry: WorkerRegistry,
     cfg: WorkerConfig,
     shutdown: ShutdownToken,
-    registry: WorkerRegistry,
-}
-
-#[tonic::async_trait]
-impl Cluster for ClusterService {
-    type SessionStream = ReceiverStream<Result<JobRequest, Status>>;
-
-    async fn session(
-        &self,
-        request: Request<Streaming<WorkerMsg>>,
-    ) -> Result<Response<Self::SessionStream>, Status> {
-        let peer = request.remote_addr();
-        let mut inbound = request.into_inner();
-
-        // First message must be Hello{slots}; it gates how many lease loops run.
-        let slots = match inbound.message().await? {
-            Some(WorkerMsg { kind: Some(worker_msg::Kind::Hello(hello)) }) => {
-                hello.slots.clamp(1, MAX_SLOTS)
-            }
-            _ => {
-                return Err(Status::invalid_argument(
-                    "first message must be Hello{slots}",
-                ));
-            }
-        };
-        tracing::info!(?peer, slots, "worker connected");
-
-        // Track the connection in the in-memory registry; the returned guard
-        // deregisters it when `read_results` returns (stream closed/errored, or
-        // the connection token cancelled).
-        let guard = self.registry.register(peer, slots).await;
-
-        // Outbound: JobRequests pushed to the worker. Cap matches slots so the
-        // channel never holds more than the in-flight jobs.
-        let (out_tx, out_rx) = mpsc::channel::<Result<JobRequest, Status>>(slots as usize);
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
-
-        // This connection's loops live until the stream drops (or global shutdown).
-        let conn_token = self.shutdown.child_token();
-
-        // Route inbound JobResults back to the waiting executors; on stream end,
-        // cancel the loops and fail any in-flight jobs.
-        tokio::spawn(read_results(
-            inbound,
-            Arc::clone(&pending),
-            conn_token.clone(),
-            peer,
-            guard,
-        ));
-
-        // Drive `slots` lease loops, each dispatching over the shared stream.
-        let executor = RemoteExecutor { out_tx, pending };
-        for _ in 0..slots {
-            let db = self.db.clone();
-            let cfg = self.cfg.clone();
-            let executor = executor.clone();
-            let token = conn_token.clone();
-            tokio::spawn(async move { worker_loop(db, executor, cfg, token).await });
-        }
-        // `executor` (and its `out_tx`) drops here; only the per-loop clones
-        // remain, so `out_rx` closes once every loop has exited.
-
-        Ok(Response::new(ReceiverStream::new(out_rx)))
-    }
-}
-
-/// Reads `JobResult`s off the worker's stream and completes the matching pending
-/// job. Ends (cancelling `token` and failing any in-flight jobs) when the stream
-/// closes or errors.
-async fn read_results(
-    mut inbound: Streaming<WorkerMsg>,
-    pending: Pending,
-    token: ShutdownToken,
-    peer: Option<SocketAddr>,
-    // Held for the connection's lifetime; dropping it here deregisters the worker.
-    _registration: WorkerGuard,
 ) {
+    let (mut sink, mut stream) = socket.split();
+
+    // First frame must be Hello{slots}; it gates how many lease loops run.
+    let Some(slots) = read_hello(&mut stream).await else {
+        tracing::warn!("worker socket closed before a valid Hello");
+        return;
+    };
+    let slots = slots.clamp(1, MAX_SLOTS);
+    tracing::info!(slots, "worker connected (ws)");
+
+    // Registry entry (peer is unknown behind a proxy); the guard deregisters on drop.
+    let guard = registry.register(None, slots).await;
+
+    // Outbound JobRequests; cap matches slots so it never holds more than in-flight.
+    let (out_tx, mut out_rx) = mpsc::channel::<JobRequest>(slots as usize);
+    let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+    let conn_token = shutdown.child_token();
+
+    // Drive `slots` lease loops, each dispatching over the shared socket.
+    let executor = RemoteExecutor { out_tx, pending: Arc::clone(&pending) };
+    for _ in 0..slots {
+        let db = db.clone();
+        let cfg = cfg.clone();
+        let executor = executor.clone();
+        let token = conn_token.clone();
+        tokio::spawn(async move { worker_loop(db, executor, cfg, token).await });
+    }
+    drop(executor); // only the per-loop clones keep out_tx alive now
+
+    // Single I/O loop over the split halves: pull jobs to send, route results back,
+    // answer pings (keepalive through idle WS proxies).
     loop {
         tokio::select! {
-            () = token.cancelled() => break,
-            msg = inbound.message() => match msg {
-                Ok(Some(WorkerMsg { kind: Some(worker_msg::Kind::Result(result)) })) => {
-                    complete_job(&pending, result).await;
+            () = conn_token.cancelled() => break,
+            job = out_rx.recv() => match job {
+                Some(job) => {
+                    let Ok(text) = serde_json::to_string(&job) else { continue };
+                    if sink.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
                 }
-                // A stray Hello or empty frame — ignore and keep reading.
-                Ok(Some(_)) => {}
-                Ok(None) => break,        // worker closed the stream
-                Err(status) => {
-                    tracing::warn!(?peer, %status, "worker stream error");
+                None => break, // every lease loop exited (shutdown)
+            },
+            inbound = stream.next() => match inbound {
+                Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMsg>(&text) {
+                    Ok(ClientMsg::Result { job_id, outcome }) => complete_job(&pending, job_id, outcome).await,
+                    Ok(ClientMsg::Hello { .. }) => {} // stray Hello — ignore
+                    Err(err) => tracing::warn!(%err, "worker sent an unparseable frame"),
+                },
+                Some(Ok(Message::Ping(payload))) => drop(sink.send(Message::Pong(payload)).await),
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(_)) => {} // pong / binary — ignore
+                Some(Err(err)) => {
+                    tracing::warn!(%err, "worker socket error");
                     break;
                 }
-            }
+            },
         }
     }
 
-    tracing::info!(?peer, "worker disconnected");
-    // Stop this connection's lease loops…
-    token.cancel();
-    // …and fail anything still in flight (dropping the senders makes the waiting
-    // `RemoteExecutor::analyze` calls return an error → non-terminal attempt →
-    // the pgmq lease lapses and the job is redelivered to another worker).
+    // Teardown: stop this connection's lease loops and fail anything still in
+    // flight (dropping the senders makes the waiting `analyze` calls error → a
+    // non-terminal attempt → the pgmq lease lapses → redelivery to another worker).
+    conn_token.cancel();
     pending.lock().await.clear();
+    drop(guard);
+    tracing::info!("worker disconnected (ws)");
+}
+
+/// Read frames until the worker's opening `Hello{slots}`; `None` if the socket
+/// ends/errors or the first text frame isn't a Hello.
+async fn read_hello(stream: &mut SplitStream<WebSocket>) -> Option<u32> {
+    while let Some(message) = stream.next().await {
+        match message {
+            Ok(Message::Text(text)) => {
+                return match serde_json::from_str::<ClientMsg>(&text) {
+                    Ok(ClientMsg::Hello { slots }) => Some(slots),
+                    _ => None,
+                };
+            }
+            Ok(Message::Close(_)) | Err(_) => return None,
+            Ok(_) => {} // ping/pong/binary before Hello — keep waiting
+        }
+    }
+    None
 }
 
 /// Deliver one job's outcome to its waiting executor (no-op if unknown/stale).
-async fn complete_job(pending: &Pending, result: JobResult) {
-    let Ok(job_id) = Uuid::parse_str(&result.job_id) else {
-        tracing::warn!(job_id = %result.job_id, "worker sent result with unparseable job id");
-        return;
-    };
+async fn complete_job(pending: &Pending, job_id: Uuid, outcome: Outcome) {
     let Some(sender) = pending.lock().await.remove(&job_id) else {
-        // No waiter: a duplicate, or the job already failed over to redelivery.
-        return;
+        return; // no waiter: a duplicate, or already failed over to redelivery
     };
-    let outcome = match result.outcome {
-        Some(job_result::Outcome::AnalysisJson(json)) => {
-            serde_json::from_str::<Json>(&json).map_err(|err| err.to_string())
-        }
-        Some(job_result::Outcome::Error(message)) => Err(message),
-        None => Err("worker sent an empty job result".to_owned()),
+    let result = match outcome {
+        Outcome::Ok(value) => Ok(value),
+        Outcome::Err(message) => Err(message),
     };
-    // The receiver may have gone away (loop cancelled); that's fine.
-    drop(sender.send(outcome));
+    drop(sender.send(result)); // receiver may be gone (loop cancelled) — fine
 }
 
-/// Executor that ships the analysis to a remote worker over its gRPC stream and
-/// awaits the result. Cloned once per lease loop on a connection; all clones
-/// share the one outbound channel and the pending-jobs map.
+/// Executor that ships the analysis to a remote worker over its socket and awaits
+/// the result. Cloned once per lease loop; all clones share the one outbound
+/// channel and the pending-jobs map.
 #[derive(Clone)]
 struct RemoteExecutor {
-    out_tx: mpsc::Sender<Result<JobRequest, Status>>,
+    out_tx: mpsc::Sender<JobRequest>,
     pending: Pending,
 }
 
@@ -216,10 +232,10 @@ impl Executor for RemoteExecutor {
         // Register the waiter before sending, so a fast result can't race us.
         self.pending.lock().await.insert(job_id, tx);
 
-        let request = JobRequest { job_id: job_id.to_string(), sgf: sgf.to_owned() };
-        if self.out_tx.send(Ok(request)).await.is_err() {
+        let request = JobRequest { job_id, sgf: sgf.to_owned() };
+        if self.out_tx.send(request).await.is_err() {
             self.pending.lock().await.remove(&job_id);
-            return Err(AppError::Queue("worker stream closed before dispatch".to_owned()));
+            return Err(AppError::Queue("worker socket closed before dispatch".to_owned()));
         }
 
         match rx.await {
@@ -229,5 +245,69 @@ impl Executor for RemoteExecutor {
             // Sender dropped: the worker disconnected before answering.
             Err(_) => Err(AppError::Queue("worker disconnected before result".to_owned())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dispatcher(token: &str) -> ClusterDispatcher {
+        ClusterDispatcher::new(
+            WorkerConfig::default(),
+            SecretString::from(token.to_owned()),
+            ShutdownToken::new(),
+        )
+    }
+
+    fn bearer(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn constant_time_compare_matches_only_identical() {
+        assert!(tokens_match("s3cret", "s3cret"));
+        assert!(!tokens_match("s3cret", "s3crew"));
+        assert!(!tokens_match("s3cret", "s3cre")); // length differs
+    }
+
+    #[test]
+    fn auth_disabled_when_token_empty() {
+        let disp = dispatcher("");
+        assert!(disp.authorized(&HeaderMap::new()));
+        assert!(disp.authorized(&bearer("anything")));
+    }
+
+    #[test]
+    fn auth_requires_matching_bearer() {
+        let disp = dispatcher("topsecret");
+        assert!(disp.authorized(&bearer("topsecret")));
+        assert!(!disp.authorized(&bearer("wrong")));
+        assert!(!disp.authorized(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn messages_round_trip_as_json() {
+        let hello = serde_json::to_string(&ClientMsg::Hello { slots: 4 }).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(&hello).unwrap(),
+            ClientMsg::Hello { slots: 4 }
+        ));
+
+        let job = JobRequest { job_id: Uuid::nil(), sgf: "(;GM[1])".to_owned() };
+        let wire = serde_json::to_string(&job).unwrap();
+        assert_eq!(serde_json::from_str::<JobRequest>(&wire).unwrap().sgf, "(;GM[1])");
+
+        let result = serde_json::to_string(&ClientMsg::Result {
+            job_id: Uuid::nil(),
+            outcome: Outcome::Err("boom".to_owned()),
+        })
+        .unwrap();
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(&result).unwrap(),
+            ClientMsg::Result { outcome: Outcome::Err(message), .. } if message == "boom"
+        ));
     }
 }
