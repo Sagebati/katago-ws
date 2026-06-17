@@ -56,10 +56,29 @@ pub fn register_client(ctx: &mut BuildCtx, engine: Arc<AnalysisEngine>, cfg: Wor
         });
 }
 
+/// A friendly worker name like `brave-otter-42`, used when `[worker].name` is
+/// unset — so a freshly-deployed worker still shows up legibly in `/workers`.
+fn generate_name() -> String {
+    const ADJECTIVES: [&str; 16] = [
+        "brave", "calm", "clever", "eager", "fuzzy", "gentle", "jolly", "keen",
+        "lucky", "mighty", "nimble", "proud", "quick", "sly", "witty", "zesty",
+    ];
+    const ANIMALS: [&str; 16] = [
+        "otter", "fox", "panda", "heron", "lynx", "koi", "wren", "ibex",
+        "gecko", "raven", "mole", "tapir", "yak", "quokka", "civet", "shrew",
+    ];
+    let bytes = uuid::Uuid::new_v4().into_bytes();
+    let adjective = ADJECTIVES[usize::from(bytes[0]) % ADJECTIVES.len()];
+    let animal = ANIMALS[usize::from(bytes[1]) % ANIMALS.len()];
+    format!("{adjective}-{animal}-{:02}", u16::from(bytes[2]) % 100)
+}
+
 /// The worker client and the resources its states share across reconnects.
 struct WorkerClient {
     engine: Arc<AnalysisEngine>,
     cfg: WorkerConfig,
+    /// Name announced to the orchestrator (from `[worker].name` or generated).
+    name: String,
     /// Slots advertised to the orchestrator = max concurrent analyses.
     slots: u32,
     /// Wait between a failed/closed session and the next dial.
@@ -102,12 +121,13 @@ impl WorkerClient {
         let slots = u32::try_from(cfg.concurrency.max(1)).unwrap_or(u32::MAX);
         let backoff = Duration::from_secs(cfg.reconnect_backoff_secs.max(1));
         let limiter = Arc::new(Semaphore::new(slots as usize));
-        Self { engine, cfg, slots, backoff, limiter, shutdown }
+        let name = if cfg.name.is_empty() { generate_name() } else { cfg.name.clone() };
+        Self { engine, cfg, name, slots, backoff, limiter, shutdown }
     }
 
     /// Drive the state machine until it reaches [`State::Stopped`].
     async fn event_loop(self) {
-        tracing::info!(url = %self.cfg.orchestrator_url, slots = self.slots, "worker client starting");
+        tracing::info!(name = %self.name, url = %self.cfg.orchestrator_url, slots = self.slots, "worker client starting");
         let mut state = State::Connecting;
         loop {
             state = match state {
@@ -195,7 +215,7 @@ impl WorkerClient {
         let (mut sink, stream) = socket.split();
 
         // Hello first, before any job can arrive.
-        let hello = serde_json::to_string(&ClientMsg::Hello { slots: self.slots })?;
+        let hello = serde_json::to_string(&ClientMsg::Hello { slots: self.slots, name: self.name.clone() })?;
         sink.send(Message::Text(hello.into())).await?;
 
         let (out_tx, out_rx) = mpsc::channel::<ClientMsg>(self.slots as usize + 1);

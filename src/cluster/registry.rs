@@ -37,8 +37,10 @@ const CMD_BUFFER: usize = 128;
 #[derive(Clone, Debug)]
 pub struct WorkerInfo {
     /// Session id — minted per connection by the orchestrator. Not stable across
-    /// a worker's reconnects (the worker proto announces only its slot count).
+    /// a worker's reconnects (the worker announces a name + slots, not an id).
     pub id: SessionId,
+    /// The name the worker registered with (from its `Hello`).
+    pub name: String,
     /// Peer socket address, when the transport exposed one.
     pub peer: Option<SocketAddr>,
     /// Slots (max concurrent jobs) the worker advertised in its `Hello`.
@@ -50,6 +52,7 @@ pub struct WorkerInfo {
 /// Messages the owner task accepts.
 enum Cmd {
     Register {
+        name: String,
         peer: Option<SocketAddr>,
         slots: u32,
         /// The owner replies with the freshly-minted session id.
@@ -80,11 +83,11 @@ impl WorkerRegistry {
     ///
     /// Best-effort: if the registry task has already stopped (shutdown), the guard
     /// carries id `0` and its drop is a no-op.
-    pub async fn register(&self, peer: Option<SocketAddr>, slots: u32) -> WorkerGuard {
+    pub async fn register(&self, name: String, peer: Option<SocketAddr>, slots: u32) -> WorkerGuard {
         let (reply, rx) = oneshot::channel();
         if self
             .tx
-            .send(Cmd::Register { peer, slots, reply })
+            .send(Cmd::Register { name, peer, slots, reply })
             .await
             .is_err()
         {
@@ -115,10 +118,10 @@ async fn owner_loop(mut rx: mpsc::Receiver<Cmd>, shutdown: ShutdownToken) {
             () = shutdown.cancelled() => break,
             cmd = rx.recv() => match cmd {
                 None => break, // every handle dropped
-                Some(Cmd::Register { peer, slots, reply }) => {
+                Some(Cmd::Register { name, peer, slots, reply }) => {
                     let id = next_id;
                     next_id += 1;
-                    workers.insert(id, WorkerInfo { id, peer, slots, connected_at: Utc::now() });
+                    workers.insert(id, WorkerInfo { id, name, peer, slots, connected_at: Utc::now() });
                     let _ = reply.send(id); // caller may have been cancelled — fine
                 }
                 Some(Cmd::Deregister(id)) => {
@@ -170,8 +173,8 @@ mod tests {
         assert!(registry.snapshot().await.is_empty());
 
         // Two connects: monotonic ids, oldest first, advertised slots preserved.
-        let g1 = registry.register(None, 4).await;
-        let g2 = registry.register(None, 8).await;
+        let g1 = registry.register("alpha".to_owned(), None, 4).await;
+        let g2 = registry.register("beta".to_owned(), None, 8).await;
         let snap = registry.snapshot().await;
         assert_eq!(snap.iter().map(|w| (w.id, w.slots)).collect::<Vec<_>>(), vec![(1, 4), (2, 8)]);
 

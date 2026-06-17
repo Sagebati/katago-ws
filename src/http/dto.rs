@@ -103,6 +103,8 @@ pub struct ListResponse {
 pub struct WorkerSummary {
     /// Orchestrator-minted session id (not stable across the worker's reconnects).
     pub id: SessionId,
+    /// The name the worker registered with (from its `Hello`).
+    pub name: String,
     /// Peer address (`host:port`), when the transport exposed one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peer: Option<String>,
@@ -117,6 +119,7 @@ impl From<WorkerInfo> for WorkerSummary {
     fn from(info: WorkerInfo) -> Self {
         Self {
             id: info.id,
+            name: info.name,
             peer: info.peer.map(|addr| addr.to_string()),
             slots: info.slots,
             connected_at: info.connected_at,

@@ -113,6 +113,9 @@ fn default_reconnect_backoff() -> u64 {
 pub struct WorkerConfig {
     /// Number of concurrent worker loops (consumer) / advertised slots (worker).
     pub concurrency: usize,
+    /// `worker` role: human-readable name to register under. Empty ⇒ a friendly
+    /// one is generated at startup (e.g. `brave-otter-42`).
+    pub name: String,
     /// pgmq visibility timeout (seconds) while a job is in flight.
     pub visibility_timeout_secs: i32,
     /// Long-poll duration (seconds) when the queue is empty.
@@ -133,6 +136,7 @@ impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
             concurrency: default_concurrency(),
+            name: String::new(),
             visibility_timeout_secs: default_visibility(),
             poll_secs: default_poll(),
             max_attempts: default_max_attempts(),

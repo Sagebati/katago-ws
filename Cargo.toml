@@ -59,7 +59,7 @@ mimalloc = "0.1"
 
 # Time-ordered (v7) job ids are minted by Postgres (the `uuidv7()` DEFAULT), so
 # this crate is only needed for the `Uuid` type + serde — no client-side gen.
-uuid = { version = "1", features = ["serde"] }
+uuid = { version = "1", features = ["serde", "v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 tracing = "0.1"

@@ -120,16 +120,16 @@ async fn run_session(
 ) {
     let (mut sink, mut stream) = socket.split();
 
-    // First frame must be Hello{slots}; it gates how many lease loops run.
-    let Some(slots) = read_hello(&mut stream).await else {
+    // First frame must be Hello; it carries the worker's name + slot count.
+    let Some((slots, name)) = read_hello(&mut stream).await else {
         tracing::warn!("worker socket closed before a valid Hello");
         return;
     };
     let slots = slots.clamp(1, MAX_SLOTS);
-    tracing::info!(slots, "worker connected (ws)");
+    tracing::info!(%name, slots, "worker connected (ws)");
 
     // Registry entry (peer is unknown behind a proxy); the guard deregisters on drop.
-    let guard = registry.register(None, slots).await;
+    let guard = registry.register(name, None, slots).await;
 
     // Outbound JobRequests; cap matches slots so it never holds more than in-flight.
     let (out_tx, mut out_rx) = mpsc::channel::<JobRequest>(slots as usize);
@@ -189,12 +189,12 @@ async fn run_session(
 
 /// Read frames until the worker's opening `Hello{slots}`; `None` if the socket
 /// ends/errors or the first text frame isn't a Hello.
-async fn read_hello(stream: &mut SplitStream<WebSocket>) -> Option<u32> {
+async fn read_hello(stream: &mut SplitStream<WebSocket>) -> Option<(u32, String)> {
     while let Some(message) = stream.next().await {
         match message {
             Ok(Message::Text(text)) => {
                 return match serde_json::from_str::<ClientMsg>(&text) {
-                    Ok(ClientMsg::Hello { slots }) => Some(slots),
+                    Ok(ClientMsg::Hello { slots, name }) => Some((slots, name)),
                     _ => None,
                 };
             }
@@ -290,10 +290,10 @@ mod tests {
 
     #[test]
     fn messages_round_trip_as_json() {
-        let hello = serde_json::to_string(&ClientMsg::Hello { slots: 4 }).unwrap();
+        let hello = serde_json::to_string(&ClientMsg::Hello { slots: 4, name: "rig".to_owned() }).unwrap();
         assert!(matches!(
             serde_json::from_str::<ClientMsg>(&hello).unwrap(),
-            ClientMsg::Hello { slots: 4 }
+            ClientMsg::Hello { slots: 4, .. }
         ));
 
         let job = JobRequest { job_id: Uuid::nil(), sgf: "(;GM[1])".to_owned() };

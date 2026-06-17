@@ -13,10 +13,13 @@ use uuid::Uuid;
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClientMsg {
-    /// First frame: the worker announces how many concurrent jobs it accepts.
+    /// First frame: the worker announces its name and how many concurrent jobs
+    /// it accepts.
     Hello {
         /// Max concurrent analyses = lease loops the orchestrator drives for it.
         slots: u32,
+        /// Human-readable name the worker picked for itself (shown in `/workers`).
+        name: String,
     },
     /// A finished job's outcome.
     Result {

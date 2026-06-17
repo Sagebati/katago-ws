@@ -92,14 +92,12 @@ fn render_index(
                      <th>Uptime</th></tr>",
                 );
                 for worker in list {
-                    let name = worker
-                        .peer
-                        .map_or_else(|| format!("session #{}", worker.id), |addr| addr.to_string());
                     let _ = write!(
                         html,
-                        "<tr><td class=\"mono\">{name}</td>\
+                        "<tr><td class=\"mono\">{}</td>\
                          <td class=\"mono muted\">#{}</td><td>{}</td>\
                          <td class=\"muted\">{}</td></tr>",
+                        worker.name,
                         worker.id,
                         worker.slots,
                         ago(worker.connected_at),
@@ -400,15 +398,16 @@ mod tests {
     #[test]
     fn dashboard_renders_workers_running_and_truncated_queue() {
         let peer: SocketAddr = "10.0.0.7:50713".parse().unwrap();
-        let workers = vec![WorkerInfo { id: 3, peer: Some(peer), slots: 4, connected_at: Utc::now() }];
+        let workers =
+            vec![WorkerInfo { id: 3, name: "rig-7".to_owned(), peer: Some(peer), slots: 4, connected_at: Utc::now() }];
         let running = vec![job(JobStatus::Running)];
         let queued = vec![job(JobStatus::Queued), job(JobStatus::Queued)];
 
         let html = render_index(Some(&workers), &running, 25, &queued);
 
-        // Worker count, its address-as-name, advertised slots, and session id.
+        // Worker count, its registered name, advertised slots, and session id.
         assert!(html.contains("<h2>Workers <span class=\"count\">1</span>"));
-        assert!(html.contains("10.0.0.7:50713"));
+        assert!(html.contains("rig-7"));
         assert!(html.contains("#3"));
         assert!(html.contains("<td>4</td>"));
         // Running section.
@@ -420,10 +419,11 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_falls_back_to_session_name_without_peer() {
-        let workers = vec![WorkerInfo { id: 7, peer: None, slots: 1, connected_at: Utc::now() }];
+    fn dashboard_shows_worker_name() {
+        let workers =
+            vec![WorkerInfo { id: 7, name: "brave-otter-42".to_owned(), peer: None, slots: 1, connected_at: Utc::now() }];
         let html = render_index(Some(&workers), &[], 0, &[]);
-        assert!(html.contains("session #7"));
+        assert!(html.contains("brave-otter-42"));
     }
 
     #[test]
