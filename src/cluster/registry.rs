@@ -2,7 +2,7 @@
 //!
 //! Follows the codebase's channel/actor convention (see the KataGo client in
 //! [`crate::engine::katago`]): one owner task exclusively holds the map of
-//! connected workers, and the gRPC sessions and the HTTP `/workers` handler touch
+//! connected workers, and the cluster WebSocket sessions and the HTTP `/workers` handler touch
 //! it only by message-passing — no `Mutex`/`Arc<Mutex>`. A session [`register`]s
 //! on connect and the returned [`WorkerGuard`] deregisters it on drop, so a
 //! closed stream, a cancellation, or a panic all clean up the entry. The handler

@@ -9,10 +9,11 @@
 //!
 //! - `standalone` — one process does everything: web API + in-process workers,
 //!   sharing Postgres/pgmq. The original single-binary deployment.
-//! - `orchestrator` — web API + pgmq + the gRPC dispatcher, but **no** engine.
-//!   It owns the DB and proxies work to remote workers over gRPC.
-//! - `worker` — runs KataGo and dials the orchestrator over gRPC; has **no**
-//!   Postgres access. Serves only `/health` (for liveness/readiness probes).
+//! - `orchestrator` — web API + pgmq + the cluster WebSocket dispatcher, but
+//!   **no** engine. It owns the DB and proxies work to remote workers over the
+//!   cluster socket.
+//! - `worker` — runs KataGo and dials the orchestrator's cluster WebSocket; has
+//!   **no** Postgres access. Serves only `/health` (for liveness/readiness probes).
 //!
 //! `orchestrator` + N `worker`s let the two tiers scale independently when the
 //! workers can't reach Postgres directly (the queue lease still lives on the
@@ -47,9 +48,9 @@ const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 enum Role {
     /// Web + in-process workers (default).
     Standalone,
-    /// Web + pgmq + gRPC dispatcher; no engine.
+    /// Web + pgmq + cluster WebSocket dispatcher; no engine.
     Orchestrator,
-    /// Engine + gRPC client; no Postgres.
+    /// Engine + cluster WebSocket client; no Postgres.
     Worker,
 }
 
@@ -114,8 +115,8 @@ async fn run_standalone() -> muxa::Result<()> {
     serve_api(app, api, &rl_cfg).await
 }
 
-/// `orchestrator`: web API + pgmq + the gRPC dispatcher; no engine. Owns the DB
-/// and proxies work to remote workers.
+/// `orchestrator`: web API + pgmq + the cluster WebSocket dispatcher; no engine.
+/// Owns the DB and proxies work to remote workers.
 async fn run_orchestrator() -> muxa::Result<()> {
     let app = App::default()
         .with_plugin(SentryPlugin)
@@ -149,8 +150,8 @@ async fn run_orchestrator() -> muxa::Result<()> {
     serve_api(app, api, &rl_cfg).await
 }
 
-/// `worker`: KataGo engine + gRPC client dialing the orchestrator; no Postgres.
-/// Serves only `/health` so `App::run` has a serve loop and probes have a target.
+/// `worker`: KataGo engine + cluster WebSocket client dialing the orchestrator; no
+/// Postgres. Serves only `/health` so `App::run` has a serve loop and probes have a target.
 async fn run_worker() -> muxa::Result<()> {
     let app = App::default()
         .with_plugin(SentryPlugin)

@@ -56,8 +56,9 @@ Test: `curl https://<your-worker>.workers.dev/health` → `ok`, then
 2. **KataGo is slow here.** Capped at 4 vCPU (CPU/Eigen build). `MUXA_ENGINE__MAX_VISITS`
    is set to 10 so a full game fits the 600 s timeout; analysis quality is far below
    a multi-core box. This is fine for demos, weak for real analysis.
-3. **Only `standalone` fits.** The `orchestrator`/`worker` gRPC split doesn't map to
-   Containers (no first-class container-to-container TCP; instances are Worker-fronted).
+3. **Only `standalone` fits.** The `orchestrator`/`worker` cluster split (workers
+   dialing the orchestrator's `/cluster` WebSocket) doesn't map to Containers
+   (instances are Worker-fronted, with no stable socket for workers to dial back into).
    To scale out, run that split on normal VMs, not multiple of these containers.
 4. **External Postgres is mandatory** and must be reachable from Cloudflare's network
    (public, or via Tunnel). The container has normal egress (unlike Workers).

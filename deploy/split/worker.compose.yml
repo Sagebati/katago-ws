@@ -1,10 +1,11 @@
 # ── WORKER HOST ──────────────────────────────────────────────────────────────
-# Runs on EACH worker machine: KataGo engine + gRPC client. No Postgres access.
-# It dials the orchestrator and processes pushed jobs. Disposable — if it dies
-# mid-job the orchestrator's pgmq lease lapses and the job is redelivered.
+# Runs on EACH worker machine: KataGo engine + cluster WebSocket client. No
+# Postgres access. It dials the orchestrator and processes pushed jobs. Disposable
+# — if it dies mid-job the orchestrator's pgmq lease lapses and the job is redelivered.
 #
 #   KATAGO_WS_IMAGE=registry.example.com/katago-ws:latest \
 #   ORCHESTRATOR_HOST=10.0.0.5 \
+#   CLUSTER_TOKEN=<same secret the orchestrator was given> \
 #   docker compose -f worker.compose.yml up -d --scale worker=4
 #
 # `--scale worker=N` runs N engines on this host; or just run this file on more
@@ -16,9 +17,11 @@ services:
     image: ${KATAGO_WS_IMAGE:?set KATAGO_WS_IMAGE}
     command: worker
     environment:
-      # The orchestrator machine's address (private IP / DNS) + gRPC port. Must
-      # be reachable from here; nothing else (no DB).
-      MUXA_WORKER__ORCHESTRATOR_URL: "http://${ORCHESTRATOR_HOST:?set ORCHESTRATOR_HOST}:50051"
+      # The orchestrator's `/cluster` WebSocket on its web port (:3000). Must be
+      # reachable from here; nothing else (no DB). Use wss:// if it's behind TLS.
+      MUXA_WORKER__ORCHESTRATOR_URL: "ws://${ORCHESTRATOR_HOST:?set ORCHESTRATOR_HOST}:3000/cluster"
+      # Shared secret presented as a Bearer token — must equal the orchestrator's.
+      MUXA_WORKER__AUTH_TOKEN: ${CLUSTER_TOKEN:?set CLUSTER_TOKEN (same secret as the orchestrator)}
       # Concurrent analyses this worker accepts (slots advertised to the orchestrator).
       MUXA_WORKER__CONCURRENCY: "2"
       MUXA_WORKER__RECONNECT_BACKOFF_SECS: "3"

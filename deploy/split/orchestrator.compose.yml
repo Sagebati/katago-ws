@@ -1,13 +1,17 @@
 # ── ORCHESTRATOR HOST ────────────────────────────────────────────────────────
-# Runs on ONE machine: the public HTTP API + pgmq + the gRPC dispatcher, plus
-# Postgres. Worker machines dial this host's :50051 over gRPC.
+# Runs on ONE machine: the public HTTP API + pgmq + the cluster WebSocket
+# dispatcher, plus Postgres. Worker machines dial this host's web port (:3000)
+# at the `/cluster` WebSocket — there is no separate dispatcher port.
 #
 #   KATAGO_WS_IMAGE=registry.example.com/katago-ws:latest \
 #   POSTGRES_PASSWORD=$(openssl rand -hex 16) \
+#   CLUSTER_TOKEN=$(openssl rand -hex 32) \
 #   docker compose -f orchestrator.compose.yml up -d
 #
-# See README.md — especially the SECURITY note: :50051 is plaintext + unauthed,
-# so firewall it to the worker network (or run everything on a private VPC/VPN).
+# See README.md — especially the SECURITY note: the cluster socket rides the web
+# port and is authenticated by CLUSTER_TOKEN (a shared Bearer secret), but plain
+# `ws://` sends it (and the SGFs) in cleartext — so keep workers on a private
+# network, or front :3000 with TLS so they can dial `wss://`.
 name: katago-ws-orchestrator
 
 services:
@@ -33,14 +37,16 @@ services:
     command: orchestrator          # role = first CLI arg, appended to ENTRYPOINT
     environment:
       MUXA_DIESEL__URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/katago
-      MUXA_ORCHESTRATOR__GRPC_LISTEN: "0.0.0.0:50051"
+      # Shared secret a worker must present (Bearer) to open the /cluster socket.
+      MUXA_ORCHESTRATOR__AUTH_TOKEN: ${CLUSTER_TOKEN:?set CLUSTER_TOKEN (shared worker secret)}
       # Consumer/dispatch knobs (apply to the orchestrator's lease loops):
       MUXA_WORKER__VISIBILITY_TIMEOUT_SECS: "120"
       MUXA_WORKER__MAX_ATTEMPTS: "3"
       RUST_LOG: info
     ports:
-      - "3000:3000"      # public HTTP API — put behind a TLS-terminating proxy/LB
-      - "50051:50051"    # gRPC dispatcher — FIREWALL to worker IPs only (see README)
+      # Public HTTP API AND the `/cluster` worker WebSocket share this one port.
+      # Put it behind a TLS-terminating proxy/LB so workers can dial wss://…/cluster.
+      - "3000:3000"
     depends_on:
       db:
         condition: service_healthy

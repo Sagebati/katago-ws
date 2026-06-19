@@ -25,7 +25,8 @@ services:
     command: orchestrator
     environment:
       MUXA_DIESEL__URL: postgres://postgres:postgres@db:5432/katago
-      MUXA_ORCHESTRATOR__GRPC_LISTEN: "0.0.0.0:50051"
+      # No MUXA_ORCHESTRATOR__AUTH_TOKEN — auth is disabled on this private compose
+      # network (the /cluster socket isn't published). Set it on both services to test auth.
       MUXA_WORKER__VISIBILITY_TIMEOUT_SECS: "60"
       RUST_LOG: info
     ports:
@@ -38,7 +39,7 @@ services:
     image: ${KATAGO_WS_IMAGE:?set KATAGO_WS_IMAGE}
     command: worker
     environment:
-      MUXA_WORKER__ORCHESTRATOR_URL: "http://orchestrator:50051"
+      MUXA_WORKER__ORCHESTRATOR_URL: "ws://orchestrator:3000/cluster"
       MUXA_WORKER__CONCURRENCY: "1"
       MUXA_ENGINE__MAX_VISITS: "8"
       RUST_LOG: info

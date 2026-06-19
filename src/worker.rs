@@ -10,8 +10,8 @@
 //! - **`standalone` role** — [`LocalExecutor`] runs KataGo in-process (registered
 //!   by [`register`] on muxa's `TaskRegistry`, one loop per `concurrency`).
 //! - **`orchestrator` role** — [`crate::cluster::server`] runs this same loop
-//!   per connected worker with a remote executor that dispatches the SGF over a
-//!   gRPC stream and awaits the result; the orchestrator keeps holding the pgmq
+//!   per connected worker with a remote executor that dispatches the SGF over the
+//!   cluster WebSocket and awaits the result; the orchestrator keeps holding the pgmq
 //!   lease, so a worker crash still triggers redelivery exactly as before.
 
 use std::sync::Arc;

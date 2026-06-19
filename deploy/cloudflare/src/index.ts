@@ -37,7 +37,7 @@ export class KatagoWs extends Container<Env> {
   envVars = {
     // Launch role (read by Role::resolve() when no CLI arg is set, which is the
     // case here — the image ENTRYPOINT is just `katago-ws`). Orchestrator = web +
-    // pgmq + gRPC dispatcher, no in-process engine.
+    // pgmq + the cluster WebSocket dispatcher, no in-process engine.
     KATAGO_WS_ROLE: "orchestrator",
     MUXA_WEB__HOST: "0.0.0.0",
     MUXA_WEB__PORT: "3000",
@@ -72,7 +72,7 @@ export class KatagoWs extends Container<Env> {
   }
 }
 
-// Single named instance: the orchestrator (gRPC dispatcher + DB/queue owner). All
+// Single named instance: the orchestrator (cluster WebSocket dispatcher + DB/queue owner). All
 // HTTP + the keep-alive pin to it. The name is bumped from "main" because a warm,
 // cron-kept-alive instance resumes its OLD image across Cloudflare's gradual
 // rollout — changing the Durable Object key forces a fresh instance onto the new

@@ -49,7 +49,7 @@ services:
 
   # ───────────────────────────────────────────────────────────────────────────
   # Split deployment on a SINGLE host (one orchestrator + N workers on the same
-  # compose network — workers reach it via compose DNS `http://orchestrator:50051`).
+  # compose network — workers reach it via compose DNS `ws://orchestrator:3000/cluster`).
   # For orchestrator and workers on SEPARATE MACHINES, use deploy/split/ instead
   # (per-machine compose files + the network/security notes). Same image, the
   # role is just the first CLI arg (the `command:`).
@@ -61,7 +61,10 @@ services:
   #   command: orchestrator            # role (appended to the ENTRYPOINT)
   #   environment:
   #     MUXA_DIESEL__URL: postgres://postgres:postgres@db:5432/goban
-  #     MUXA_ORCHESTRATOR__GRPC_LISTEN: "0.0.0.0:50051"
+  #     # The cluster socket is served at /cluster on the web port (3000) — no extra
+  #     # port. Auth is disabled here (private compose network); set
+  #     # MUXA_ORCHESTRATOR__AUTH_TOKEN (+ the worker's MUXA_WORKER__AUTH_TOKEN) to
+  #     # require a shared Bearer secret.
   #     RUST_LOG: info
   #   ports:
   #     - "3000:3000"                  # public API
@@ -77,8 +80,8 @@ services:
   #   command: worker
   #   environment:
   #     # No MUXA_DIESEL__URL — workers never reach Postgres; they only dial the
-  #     # orchestrator's gRPC port (service name resolves on the compose network).
-  #     MUXA_WORKER__ORCHESTRATOR_URL: "http://orchestrator:50051"
+  #     # orchestrator's /cluster WebSocket (service name resolves on the compose network).
+  #     MUXA_WORKER__ORCHESTRATOR_URL: "ws://orchestrator:3000/cluster"
   #     APPIMAGE_EXTRACT_AND_RUN: "1"  # see the `app` service note
   #     MUXA_ENGINE__MAX_VISITS: "10"
   #     RUST_LOG: info

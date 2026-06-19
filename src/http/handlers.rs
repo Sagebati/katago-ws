@@ -293,7 +293,7 @@ pub async fn list(State(api): State<ApiState>) -> AppResult<Json<ListResponse>> 
     Ok(Json(ListResponse { analyses }))
 }
 
-/// `GET /workers` — the workers currently holding a live gRPC session to this
+/// `GET /workers` — the workers currently holding a live WebSocket session to this
 /// orchestrator, oldest connection first.
 ///
 /// This reads the orchestrator's **in-memory** registry, so it's an
