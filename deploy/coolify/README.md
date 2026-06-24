@@ -64,7 +64,30 @@ Set `MUXA_ORCHESTRATOR__AUTH_TOKEN` and give workers the matching
 `MUXA_WORKER__AUTH_TOKEN`. For an open pool, move to per-worker tokens later so a
 bad worker can be revoked without rotating everyone's.
 
-## 6. Auto-deploy (optional)
+## 6. Sentry (error tracking, optional)
+The orchestrator role already loads the Sentry plugin — it just needs a DSN. With
+no DSN it runs a no-op client (nothing is sent), so this step is optional.
+
+1. In Sentry: **Create project → Platform: Rust**. Copy its **DSN**
+   (`https://<key>@<org>.ingest.sentry.io/<project>`).
+2. In Coolify → this resource → **Environment Variables**, add a **secret**:
+   - `MUXA_SENTRY__DSN` = the DSN from step 1. That's the only required one.
+3. **Redeploy**. On boot the logs show `muxa-sentry: initialized` (vs. `no DSN set,
+   running as no-op client`). Panics, errors, and request transactions land in Sentry.
+
+The compose sets `MUXA_ENV=production` (muxa's core run mode), so Sentry's
+**environment** defaults to `production` and the **transaction sample rate to
+0.1** (10%) — performance monitoring is on, sampled to bound cost/quota. Locally
+(debug build ⇒ `development`) both default the other way: environment
+`development`, rate **1.0** (every trace). Override per-knob with
+`MUXA_SENTRY__ENVIRONMENT` / `MUXA_SENTRY__TRACES_SAMPLE_RATE` (`1.0` = trace
+everything, `0.0` = errors only).
+
+The DSN is a `SecretString`: it's redacted from `Debug`/logs, so it won't leak into
+the dashboard or traces. Workers can take the same `MUXA_SENTRY__DSN` to report
+their own KataGo-side errors; tag them apart with `MUXA_SENTRY__ENVIRONMENT`.
+
+## 7. Auto-deploy (optional)
 Add the repo secret `COOLIFY_DEPLOY_HOOK` (your Coolify resource's deploy webhook
 URL) and `image.yml` will ping it after each push → Coolify pulls + rolls the new
 image. Full CD onto your VPS.

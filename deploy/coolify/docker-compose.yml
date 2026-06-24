@@ -14,6 +14,10 @@ services:
     environment:
       # Role selector (no CLI arg in a managed container → use the env var).
       KATAGO_WS_ROLE: orchestrator
+      # Run mode (muxa core): drives env-aware defaults (Sentry environment +
+      # trace sample rate). The release image already deduces "production" from
+      # its build profile; set it explicitly here too so it's unambiguous.
+      MUXA_ENV: production
       MUXA_WEB__HOST: "0.0.0.0"
       MUXA_WEB__PORT: "3000"
       MUXA_WEB__BANNER: "false"
@@ -25,6 +29,15 @@ services:
       # Shared secret a worker must present (Bearer) to open /cluster. Empty =
       # auth DISABLED, and this socket is PUBLIC on the internet — set it.
       MUXA_ORCHESTRATOR__AUTH_TOKEN: ${MUXA_ORCHESTRATOR__AUTH_TOKEN:-}
+      # Sentry (error tracking). Empty DSN ⇒ no-op client, nothing sent — so this
+      # is safe to leave blank. Set MUXA_SENTRY__DSN as a Coolify SECRET to enable.
+      # The DSN is redacted in logs (SecretString). See README §6.
+      #
+      # With MUXA_ENV=production above, the Sentry environment defaults to
+      # "production" and the transaction sample rate to 0.1 (10%) — no Sentry-
+      # specific env needed. Override with MUXA_SENTRY__ENVIRONMENT /
+      # MUXA_SENTRY__TRACES_SAMPLE_RATE (e.g. 1.0 = all requests, 0.0 = errors only).
+      MUXA_SENTRY__DSN: ${MUXA_SENTRY__DSN:-}
       RUST_LOG: info
     expose:
       - "3000"

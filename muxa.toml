@@ -5,6 +5,12 @@
 # Secrets (diesel.url, sentry.dsn) should come from the environment in
 # production rather than being committed here.
 
+# Run mode (muxa core): "development" or "production". Drives env-aware defaults
+# like the Sentry environment + trace sample rate. Left unset here, so muxa
+# deduces it from the build profile — a debug build (local dev) ⇒ development, a
+# release build (the container) ⇒ production. Override with MUXA_ENV.
+# env = "development"
+
 [web]
 host = "0.0.0.0"
 port = 3000
@@ -21,8 +27,10 @@ metric_interval_secs = 60
 [sentry]
 # Leave dsn empty for local dev → Sentry runs as a no-op client.
 dsn = ""
-environment = "development"
-traces_sample_rate = 0.0
+# environment + traces_sample_rate are intentionally unset: muxa derives both
+# from the run mode (see `env` above). development → environment "development",
+# sample rate 1.0; production → "production", 0.1. Override either via
+# MUXA_SENTRY__ENVIRONMENT / MUXA_SENTRY__TRACES_SAMPLE_RATE.
 
 [diesel]
 # Override with MUXA_DIESEL__URL in deployment.
