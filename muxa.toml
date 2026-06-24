@@ -31,6 +31,9 @@ dsn = ""
 # from the run mode (see `env` above). development → environment "development",
 # sample rate 1.0; production → "production", 0.1. Override either via
 # MUXA_SENTRY__ENVIRONMENT / MUXA_SENTRY__TRACES_SAMPLE_RATE.
+# logs: INFO/WARN/ERROR tracing events are also shipped to Sentry's Logs product
+# (on by default once a DSN is set). Set logs = false to disable.
+# logs = true
 
 [diesel]
 # Override with MUXA_DIESEL__URL in deployment.

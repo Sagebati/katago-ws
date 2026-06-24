@@ -83,6 +83,17 @@ The compose sets `MUXA_ENV=production` (muxa's core run mode), so Sentry's
 `MUXA_SENTRY__ENVIRONMENT` / `MUXA_SENTRY__TRACES_SAMPLE_RATE` (`1.0` = trace
 everything, `0.0` = errors only).
 
+What lands in Sentry once the DSN is set:
+- **Issues** — panics + `error!` events.
+- **Traces / DB spans** — one transaction per HTTP request (sampled at the rate
+  above); diesel queries show as child spans. The dashboard (`GET /`) and the
+  `/analyses` + `/analyse/{id}` endpoints all hit Postgres, so they populate the
+  Performance + DB views. To actually see them, bump
+  `MUXA_SENTRY__TRACES_SAMPLE_RATE=1.0` while testing. *(Note: the background
+  analysis pipeline runs outside HTTP, so its queries aren't traced yet.)*
+- **Logs** — INFO/WARN/ERROR log lines stream to the Logs explorer (muxa enables
+  `enable_logs`; set `MUXA_SENTRY__LOGS=false` to turn off).
+
 The DSN is a `SecretString`: it's redacted from `Debug`/logs, so it won't leak into
 the dashboard or traces. Workers can take the same `MUXA_SENTRY__DSN` to report
 their own KataGo-side errors; tag them apart with `MUXA_SENTRY__ENVIRONMENT`.
