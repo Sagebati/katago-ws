@@ -3225,6 +3225,7 @@ dependencies = [
  "sentry-contexts",
  "sentry-core",
  "sentry-debug-images",
+ "sentry-log",
  "sentry-panic",
  "sentry-tracing",
  "tokio",
@@ -3289,6 +3290,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "660e9def38a573a869a182f7e90f58aaaa460f38b92b31fd1755ec537193bb48"
 dependencies = [
  "findshlibs",
+ "sentry-core",
+]
+
+[[package]]
+name = "sentry-log"
+version = "0.48.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c13b9313bdd6a9db19e65ac0e4754e64dea6f18cdd15444656abb050db4538d"
+dependencies = [
+ "bitflags",
+ "log",
  "sentry-core",
 ]
 
