@@ -25,6 +25,7 @@ mod db;
 mod engine;
 mod error;
 mod http;
+mod metrics;
 mod queue;
 mod worker;
 

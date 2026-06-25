@@ -122,10 +122,15 @@ async fn owner_loop(mut rx: mpsc::Receiver<Cmd>, shutdown: ShutdownToken) {
                     let id = next_id;
                     next_id += 1;
                     workers.insert(id, WorkerInfo { id, name, peer, slots, connected_at: Utc::now() });
+                    crate::metrics::metrics().worker_delta(1);
                     let _ = reply.send(id); // caller may have been cancelled — fine
                 }
                 Some(Cmd::Deregister(id)) => {
-                    workers.remove(&id);
+                    // Only adjust the gauge if this id was actually present (a
+                    // guard whose registry already stopped carries id 0).
+                    if workers.remove(&id).is_some() {
+                        crate::metrics::metrics().worker_delta(-1);
+                    }
                 }
                 Some(Cmd::Snapshot(reply)) => {
                     let mut list: Vec<WorkerInfo> = workers.values().cloned().collect();

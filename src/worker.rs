@@ -136,6 +136,8 @@ async fn handle<E: Executor>(
         tracing::warn!(%job_id, read_ct = msg.read_ct, "max attempts exceeded; failing job");
         db::set_failed(db, job_id, "max delivery attempts exceeded").await?;
         queue::archive(db, queue::Queue::Analysis, msg_id).await?;
+        // Terminal failure without an analysis run → count it, no duration.
+        crate::metrics::metrics().job_processed("failed", None);
         return Ok(());
     }
 
@@ -150,7 +152,9 @@ async fn handle<E: Executor>(
     // lease is still held here — a worker crash drops the result, this records a
     // non-terminal failure, and the job is redelivered, same as a local crash.)
     let heartbeat = VtHeartbeat::start(db.clone(), msg_id, cfg.visibility_timeout_secs);
+    let started = std::time::Instant::now();
     let result = executor.analyze(job_id, &msg.message.sgf).await;
+    let elapsed = started.elapsed().as_secs_f64();
     drop(heartbeat); // stop re-arming the lock now that analysis is done
 
     match result {
@@ -162,6 +166,7 @@ async fn handle<E: Executor>(
             db::set_done(db, job_id, value).await?;
             // Success — and only now — remove the message from the queue.
             queue::archive(db, queue::Queue::Analysis, msg_id).await?;
+            crate::metrics::metrics().job_processed("done", Some(elapsed));
             tracing::info!(%job_id, num_moves, "analysis complete");
             Ok(())
         }
@@ -173,6 +178,7 @@ async fn handle<E: Executor>(
             // — not a terminal failure — keeps a later retry free to succeed.
             tracing::warn!(%job_id, error = %err, "analysis attempt failed; leaving for redelivery");
             db::record_attempt_failure(db, job_id, &err.to_string()).await?;
+            crate::metrics::metrics().job_processed("retry", Some(elapsed));
             // Handled: attempt recorded, message left for redelivery.
             Ok(())
         }

@@ -1782,6 +1782,7 @@ dependencies = [
  "futures-util",
  "mimalloc",
  "muxa",
+ "opentelemetry",
  "pgmq 0.34.0-alpha",
  "rustls",
  "schemars",

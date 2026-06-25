@@ -37,6 +37,12 @@ secrecy = { version = "0.10", features = ["serde"] }
 schemars = { version = "1", features = ["derive"] }
 async-stream = "0.3"
 
+# Custom metrics (workers/jobs/duration) via the global meter that muxa-otel's
+# `otel-metrics` installs. Pinned to muxa's opentelemetry line so the meter
+# provider unifies. No collector configured ⇒ a no-op meter, so recording is
+# a cheap no-op (nothing exported until `[otel].endpoint` is set).
+opentelemetry = { version = "0.32", features = ["metrics"] }
+
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "sync", "time"] }
 # `Stream` trait for the SSE response type; `sync` adds `ReceiverStream`, used to
 # bridge the orchestrator's per-worker job channel into the WebSocket writer.
