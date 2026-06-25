@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use muxa::diesel::DieselPool;
 use muxa::prelude::{BuildCtx, ShutdownToken};
-use opentelemetry::metrics::{Counter, Gauge, Histogram, UpDownCounter};
+use opentelemetry::metrics::{Counter, Gauge, Histogram};
 use opentelemetry::{KeyValue, global};
 
 use crate::db::{self, status::JobStatus};
@@ -30,11 +30,24 @@ use crate::db::{self, status::JobStatus};
 /// cheap `COUNT` every few seconds is negligible next to the dashboard's queries.
 const QUEUE_SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 
+// Metric names — shared by the OTEL instruments and the Sentry SDK emission so
+// the two backends agree.
+const NAME_WORKERS: &str = "katago_ws.workers.connected";
+const NAME_WAITING: &str = "katago_ws.jobs.waiting";
+const NAME_PROCESSED: &str = "katago_ws.jobs.processed";
+const NAME_DURATION: &str = "katago_ws.job.duration";
+
 /// Process-wide instrument handles, built once on first use.
+///
+/// Each metric is **dual-emitted**: to OpenTelemetry (→ OTLP collector / Grafana)
+/// and to Sentry's Application Metrics product via the SDK. The OTEL handles are
+/// stored here; the Sentry side is stateless (`sentry::metrics::*` go through the
+/// global hub) and a no-op when no DSN is set. Sentry does not ingest OTLP
+/// metrics, so its native SDK API is the only way to land these in Sentry.
 pub struct Metrics {
     /// Cluster workers currently holding a live session to this orchestrator.
-    /// An up/down counter used as a gauge (+1 on connect, -1 on disconnect).
-    workers_connected: UpDownCounter<i64>,
+    /// A gauge — the registry sets the absolute count on every connect/disconnect.
+    workers_connected: Gauge<i64>,
     /// Jobs queued and waiting to be picked up (queue depth). Sampled from the
     /// DB by [`spawn_queue_depth_sampler`], since the value lives in Postgres.
     jobs_waiting: Gauge<i64>,
@@ -45,14 +58,16 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// A worker connected (`+1`) or disconnected (`-1`).
-    pub fn worker_delta(&self, delta: i64) {
-        self.workers_connected.add(delta, &[]);
+    /// Set the absolute number of connected workers.
+    pub fn set_workers_connected(&self, count: i64) {
+        self.workers_connected.record(count, &[]);
+        sentry::metrics::gauge(NAME_WORKERS, count as f64).capture();
     }
 
     /// Set the current queue depth (jobs waiting to be processed).
     pub fn set_jobs_waiting(&self, count: i64) {
         self.jobs_waiting.record(count, &[]);
+        sentry::metrics::gauge(NAME_WAITING, count as f64).capture();
     }
 
     /// Record one processed job. `outcome` is `"done"`, `"retry"` (a non-terminal
@@ -60,10 +75,16 @@ impl Metrics {
     /// is the analysis wall-time when one ran (`None` for the poison/max-attempts
     /// path, which gives up before analyzing).
     pub fn job_processed(&self, outcome: &'static str, duration: Option<f64>) {
-        let attrs = [KeyValue::new("outcome", outcome)];
-        self.jobs_processed.add(1, &attrs);
+        self.jobs_processed.add(1, &[KeyValue::new("outcome", outcome)]);
+        sentry::metrics::counter(NAME_PROCESSED, 1.0)
+            .attribute("outcome", outcome)
+            .capture();
         if let Some(secs) = duration {
-            self.job_duration.record(secs, &attrs);
+            self.job_duration.record(secs, &[KeyValue::new("outcome", outcome)]);
+            sentry::metrics::distribution(NAME_DURATION, secs)
+                .unit("second")
+                .attribute("outcome", outcome)
+                .capture();
         }
     }
 }
@@ -75,19 +96,19 @@ pub fn metrics() -> &'static Metrics {
         let meter = global::meter("katago-ws");
         Metrics {
             workers_connected: meter
-                .i64_up_down_counter("katago_ws.workers.connected")
+                .i64_gauge(NAME_WORKERS)
                 .with_description("Cluster workers with a live session to this orchestrator")
                 .build(),
             jobs_waiting: meter
-                .i64_gauge("katago_ws.jobs.waiting")
+                .i64_gauge(NAME_WAITING)
                 .with_description("Jobs queued and waiting to be processed")
                 .build(),
             jobs_processed: meter
-                .u64_counter("katago_ws.jobs.processed")
+                .u64_counter(NAME_PROCESSED)
                 .with_description("Analysis jobs that reached a terminal state, by outcome")
                 .build(),
             job_duration: meter
-                .f64_histogram("katago_ws.job.duration")
+                .f64_histogram(NAME_DURATION)
                 .with_unit("s")
                 .with_description("Wall-clock time to analyze one job")
                 // Buckets tuned for seconds-to-minutes KataGo analyses.

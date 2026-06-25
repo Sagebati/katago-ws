@@ -42,6 +42,13 @@ async-stream = "0.3"
 # provider unifies. No collector configured ⇒ a no-op meter, so recording is
 # a cheap no-op (nothing exported until `[otel].endpoint` is set).
 opentelemetry = { version = "0.32", features = ["metrics"] }
+# Sentry bridge for those same metrics: the `metrics` feature turns on the
+# Sentry SDK's Application Metrics API (sentry::metrics::{counter,gauge,
+# distribution}), which we dual-emit to alongside OTEL. Sentry does NOT ingest
+# OTLP metrics, so this native SDK path is the only way to land them in Sentry —
+# and it reuses the existing DSN (no collector). default-features=false: the
+# transport/TLS features come unified from muxa-sentry's sentry dep.
+sentry = { version = "0.48", default-features = false, features = ["metrics"] }
 
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "sync", "time"] }
 # `Stream` trait for the SSE response type; `sync` adds `ReceiverStream`, used to

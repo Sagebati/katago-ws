@@ -1787,6 +1787,7 @@ dependencies = [
  "rustls",
  "schemars",
  "secrecy",
+ "sentry",
  "serde",
  "serde_json",
  "sgf-parser",
