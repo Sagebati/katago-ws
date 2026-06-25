@@ -109,6 +109,8 @@ async fn run_standalone() -> muxa::Result<()> {
 
     let mut app = app;
     worker::register(app.ctx_mut(), db.clone(), engine, worker_cfg);
+    // Sample queue depth → `katago_ws.jobs.waiting`.
+    metrics::spawn_queue_depth_sampler(app.ctx_mut(), db.clone());
 
     // No remote workers in this role (the engine runs in-process), so `/workers`
     // is empty and the `/cluster` socket isn't mounted.
@@ -139,6 +141,8 @@ async fn run_orchestrator() -> muxa::Result<()> {
     let mut app = app;
     // The dispatcher records each connected worker here; `/workers` reads it too.
     let registry = cluster::registry::WorkerRegistry::spawn(app.ctx_mut());
+    // Sample queue depth → `katago_ws.jobs.waiting`.
+    metrics::spawn_queue_depth_sampler(app.ctx_mut(), db.clone());
 
     // The cluster socket rides the web router (`GET /cluster`); set the dispatcher
     // state so `api_router` mounts it and the handler can auth + dispatch jobs.

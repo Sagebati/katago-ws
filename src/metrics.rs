@@ -5,8 +5,9 @@
 //! unset), `global::meter` returns a no-op meter, so every instrument is a no-op
 //! and recording costs ~nothing — safe to call unconditionally from any role.
 //!
-//! Three instruments, matching the operational questions:
+//! Four instruments, matching the operational questions:
 //! - `katago_ws.workers.connected` — gauge: cluster workers with a live session.
+//! - `katago_ws.jobs.waiting`       — gauge: jobs queued and waiting to run.
 //! - `katago_ws.jobs.processed`     — counter (by `outcome`): job throughput.
 //! - `katago_ws.job.duration`       — histogram (seconds, by `outcome`): time per job.
 //!
@@ -15,15 +16,28 @@
 //! cadence.
 
 use std::sync::OnceLock;
+use std::time::Duration;
 
-use opentelemetry::metrics::{Counter, Histogram, UpDownCounter};
+use muxa::diesel::DieselPool;
+use muxa::prelude::{BuildCtx, ShutdownToken};
+use opentelemetry::metrics::{Counter, Gauge, Histogram, UpDownCounter};
 use opentelemetry::{KeyValue, global};
+
+use crate::db::{self, status::JobStatus};
+
+/// How often the queue-depth sampler reads `jobs.waiting` from the DB. Kept well
+/// below a typical metric export interval so the exported gauge is fresh, while a
+/// cheap `COUNT` every few seconds is negligible next to the dashboard's queries.
+const QUEUE_SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Process-wide instrument handles, built once on first use.
 pub struct Metrics {
     /// Cluster workers currently holding a live session to this orchestrator.
     /// An up/down counter used as a gauge (+1 on connect, -1 on disconnect).
     workers_connected: UpDownCounter<i64>,
+    /// Jobs queued and waiting to be picked up (queue depth). Sampled from the
+    /// DB by [`spawn_queue_depth_sampler`], since the value lives in Postgres.
+    jobs_waiting: Gauge<i64>,
     /// Jobs that reached a terminal state, tagged `outcome` ∈ {done, retry, failed}.
     jobs_processed: Counter<u64>,
     /// Wall-clock seconds spent analyzing one job, tagged `outcome`.
@@ -34,6 +48,11 @@ impl Metrics {
     /// A worker connected (`+1`) or disconnected (`-1`).
     pub fn worker_delta(&self, delta: i64) {
         self.workers_connected.add(delta, &[]);
+    }
+
+    /// Set the current queue depth (jobs waiting to be processed).
+    pub fn set_jobs_waiting(&self, count: i64) {
+        self.jobs_waiting.record(count, &[]);
     }
 
     /// Record one processed job. `outcome` is `"done"`, `"retry"` (a non-terminal
@@ -59,6 +78,10 @@ pub fn metrics() -> &'static Metrics {
                 .i64_up_down_counter("katago_ws.workers.connected")
                 .with_description("Cluster workers with a live session to this orchestrator")
                 .build(),
+            jobs_waiting: meter
+                .i64_gauge("katago_ws.jobs.waiting")
+                .with_description("Jobs queued and waiting to be processed")
+                .build(),
             jobs_processed: meter
                 .u64_counter("katago_ws.jobs.processed")
                 .with_description("Analysis jobs that reached a terminal state, by outcome")
@@ -72,4 +95,27 @@ pub fn metrics() -> &'static Metrics {
                 .build(),
         }
     })
+}
+
+/// Spawn a background task that samples the queue depth (jobs in `Queued`) and
+/// records it into the `katago_ws.jobs.waiting` gauge. The value lives in
+/// Postgres, and OTEL's gauge-collection callback is synchronous (can't await a
+/// diesel-async query), so a small async sampler is the clean way to feed it.
+///
+/// Only the DB-owning roles (`standalone` / `orchestrator`) should call this.
+pub fn spawn_queue_depth_sampler(ctx: &mut BuildCtx, db: DieselPool) {
+    ctx.tasks
+        .spawn("jobs-waiting-sampler", move |shutdown: ShutdownToken| async move {
+            let metrics = metrics();
+            loop {
+                match db::count_in_state(&db, JobStatus::Queued).await {
+                    Ok(count) => metrics.set_jobs_waiting(count),
+                    Err(err) => tracing::warn!(error = %err, "queue-depth sample failed"),
+                }
+                tokio::select! {
+                    () = shutdown.cancelled() => break,
+                    () = tokio::time::sleep(QUEUE_SAMPLE_INTERVAL) => {}
+                }
+            }
+        });
 }
