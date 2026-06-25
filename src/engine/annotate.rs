@@ -72,41 +72,66 @@ pub struct MoveAnnotation {
     pub top_moves: Vec<Candidate>,
 }
 
-/// Mistake/blunder counts under one lens (win-rate loss or score loss).
+/// Move-quality breakdown for one player under a single lens (win-rate loss or
+/// score loss): how many of their moves fell into each [`Classification`].
 #[derive(Serialize, Default)]
-pub struct Tally {
-    /// Black moves classified as `mistake`.
-    pub black_mistakes: usize,
-    /// White moves classified as `mistake`.
-    pub white_mistakes: usize,
-    /// Black moves classified as `blunder`.
-    pub black_blunders: usize,
-    /// White moves classified as `blunder`.
-    pub white_blunders: usize,
+pub struct ClassCounts {
+    /// Moves classified as `good`.
+    pub good: usize,
+    /// Moves classified as `inaccuracy`.
+    pub inaccuracy: usize,
+    /// Moves classified as `mistake`.
+    pub mistake: usize,
+    /// Moves classified as `blunder`.
+    pub blunder: usize,
 }
 
-impl Tally {
-    /// Count one move's classification against the mover's colour.
-    fn record(&mut self, classification: Classification, color: Color) {
-        match (classification, color) {
-            (Classification::Mistake, Color::Black) => self.black_mistakes += 1,
-            (Classification::Mistake, Color::White) => self.white_mistakes += 1,
-            (Classification::Blunder, Color::Black) => self.black_blunders += 1,
-            (Classification::Blunder, Color::White) => self.white_blunders += 1,
-            _ => {}
+impl ClassCounts {
+    /// Tally one move's classification.
+    fn record(&mut self, classification: Classification) {
+        match classification {
+            Classification::Good => self.good += 1,
+            Classification::Inaccuracy => self.inaccuracy += 1,
+            Classification::Mistake => self.mistake += 1,
+            Classification::Blunder => self.blunder += 1,
         }
     }
 }
 
-/// Whole-game roll-up, tallied under both lenses (see [`Tally`]).
+/// AI-review-style aggregate metrics for one player across the whole game.
 #[derive(Serialize)]
-pub struct GameSummary {
-    /// Number of annotated moves.
+pub struct PlayerReport {
+    /// Number of moves this player made.
+    pub moves: usize,
+    /// Overall accuracy in `[0, 100]` — the mean of each move's accuracy, where a
+    /// single move's accuracy is mapped from its win-rate loss by [`move_accuracy`].
+    /// A flawless game approaches 100.
+    pub accuracy: f32,
+    /// Mean win probability given up per move (`[0, 1]`).
+    pub mean_winrate_loss: f32,
+    /// Mean points given up per move.
+    pub mean_score_loss: f32,
+    /// Move-quality breakdown by win-rate loss.
+    pub by_winrate: ClassCounts,
+    /// Move-quality breakdown by score loss.
+    pub by_score: ClassCounts,
+    /// Coarse strength estimate derived from `mean_score_loss`. Present only for
+    /// full-size (19×19) games with enough moves to be meaningful; a rough
+    /// indicator, not a calibrated rank. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_rank: Option<String>,
+}
+
+/// Whole-game report: per-player aggregate metrics (accuracy, mean loss, the
+/// mistake/blunder breakdown, and a rough strength estimate).
+#[derive(Serialize)]
+pub struct GameReport {
+    /// Number of annotated moves (both players).
     pub num_moves: usize,
-    /// Counts by win-rate loss (probability dropped).
-    pub by_winrate: Tally,
-    /// Counts by score loss (points dropped).
-    pub by_score: Tally,
+    /// Black's aggregate metrics.
+    pub black: PlayerReport,
+    /// White's aggregate metrics.
+    pub white: PlayerReport,
 }
 
 /// Full analysis payload.
@@ -122,8 +147,97 @@ pub struct GameAnalysis {
     pub result: Option<String>,
     /// Per-move annotations in play order.
     pub moves: Vec<MoveAnnotation>,
-    /// Aggregate summary.
-    pub summary: GameSummary,
+    /// Per-player aggregate report.
+    pub report: GameReport,
+}
+
+/// Running per-player accumulator used while walking the move list; finalized
+/// into a [`PlayerReport`] once every move is counted.
+#[derive(Default)]
+struct PlayerAccum {
+    moves: usize,
+    winrate_loss_sum: f32,
+    score_loss_sum: f32,
+    accuracy_sum: f32,
+    by_winrate: ClassCounts,
+    by_score: ClassCounts,
+}
+
+impl PlayerAccum {
+    /// Fold one of the player's moves into the running totals.
+    fn record(
+        &mut self,
+        winrate_loss: f32,
+        score_loss: f32,
+        winrate_class: Classification,
+        score_class: Classification,
+    ) {
+        self.moves += 1;
+        self.winrate_loss_sum += winrate_loss;
+        self.score_loss_sum += score_loss;
+        self.accuracy_sum += move_accuracy(winrate_loss);
+        self.by_winrate.record(winrate_class);
+        self.by_score.record(score_class);
+    }
+
+    /// Turn the accumulated totals into the player's report.
+    fn finish(self, board_size: u8) -> PlayerReport {
+        // Guard the empty-player case (e.g. a game with no White moves): means
+        // are 0, not a division by zero.
+        let denom = self.moves.max(1) as f32;
+        let mean_score_loss = self.score_loss_sum / denom;
+        PlayerReport {
+            moves: self.moves,
+            accuracy: self.accuracy_sum / denom,
+            mean_winrate_loss: self.winrate_loss_sum / denom,
+            mean_score_loss,
+            by_winrate: self.by_winrate,
+            by_score: self.by_score,
+            estimated_rank: estimate_rank(board_size, self.moves, mean_score_loss),
+        }
+    }
+}
+
+/// Per-move accuracy in `[0, 100]` from win-rate loss, via the logistic mapping
+/// popularised by Lichess: `103.1668·e^(−0.04354·Δ) − 3.1669`, where `Δ` is the
+/// win probability dropped, in **percentage points**. A best move scores ~100 and
+/// accuracy decays smoothly as a move gives up more win probability.
+fn move_accuracy(winrate_loss: f32) -> f32 {
+    let drop = (winrate_loss * 100.0).max(0.0);
+    (103.1668 * (-0.04354 * drop).exp() - 3.1669).clamp(0.0, 100.0)
+}
+
+/// Below this move count a strength estimate is too noisy to report.
+const RANK_MIN_MOVES: usize = 20;
+
+/// Very rough strength band from mean points lost per move — monotone (fewer
+/// points lost ⇒ stronger). Emitted only for full 19×19 games with at least
+/// [`RANK_MIN_MOVES`] moves; it's a coarse indicator, not a calibrated rank, and
+/// the thresholds are heuristic (tune to taste).
+fn estimate_rank(board_size: u8, moves: usize, mean_score_loss: f32) -> Option<String> {
+    if board_size != 19 || moves < RANK_MIN_MOVES {
+        return None;
+    }
+    let band = if mean_score_loss < 0.8 {
+        "~7d+"
+    } else if mean_score_loss < 1.2 {
+        "~5d"
+    } else if mean_score_loss < 1.7 {
+        "~3d"
+    } else if mean_score_loss < 2.2 {
+        "~1d"
+    } else if mean_score_loss < 2.8 {
+        "~2k"
+    } else if mean_score_loss < 3.5 {
+        "~5k"
+    } else if mean_score_loss < 4.5 {
+        "~8k"
+    } else if mean_score_loss < 6.0 {
+        "~12k"
+    } else {
+        "~15k+"
+    };
+    Some(band.to_owned())
 }
 
 /// Classify a move by win-rate loss (win probability the move gave up).
@@ -164,11 +278,8 @@ pub fn assemble(game: &ParsedGame, turns: Vec<TurnResponse>, top_k: usize) -> Ga
         .collect();
 
     let mut moves = Vec::with_capacity(game.moves.len());
-    let mut summary = GameSummary {
-        num_moves: game.moves.len(),
-        by_winrate: Tally::default(),
-        by_score: Tally::default(),
-    };
+    let mut black = PlayerAccum::default();
+    let mut white = PlayerAccum::default();
 
     for (i, (color, mv)) in game.moves.iter().enumerate() {
         let cur = by_turn.get(&i).and_then(|turn| turn.root_info.as_ref());
@@ -209,8 +320,11 @@ pub fn assemble(game: &ParsedGame, turns: Vec<TurnResponse>, top_k: usize) -> Ga
             })
             .unwrap_or_default();
 
-        summary.by_winrate.record(winrate_classification, *color);
-        summary.by_score.record(score_classification, *color);
+        let accum = match color {
+            Color::Black => &mut black,
+            Color::White => &mut white,
+        };
+        accum.record(winrate_loss, score_loss, winrate_classification, score_classification);
 
         moves.push(MoveAnnotation {
             move_number: i + 1,
@@ -233,7 +347,11 @@ pub fn assemble(game: &ParsedGame, turns: Vec<TurnResponse>, top_k: usize) -> Ga
         rules: game.rules,
         result: game.result.clone(),
         moves,
-        summary,
+        report: GameReport {
+            num_moves: game.moves.len(),
+            black: black.finish(game.board_size),
+            white: white.finish(game.board_size),
+        },
     }
 }
 
@@ -284,9 +402,35 @@ mod tests {
         assert_eq!(mv.winrate_classification, Classification::Blunder);
         assert!((mv.score_loss - 3.0).abs() < 1e-5);
         assert_eq!(mv.score_classification, Classification::Mistake);
-        assert_eq!(analysis.summary.by_winrate.black_blunders, 1);
-        assert_eq!(analysis.summary.by_score.black_mistakes, 1);
+        // The move lands in Black's report under each lens.
+        assert_eq!(analysis.report.num_moves, 1);
+        assert_eq!(analysis.report.black.moves, 1);
+        assert_eq!(analysis.report.white.moves, 0);
+        assert_eq!(analysis.report.black.by_winrate.blunder, 1);
+        assert_eq!(analysis.report.black.by_score.mistake, 1);
         assert_eq!(mv.top_moves.len(), 1);
         assert_eq!(mv.top_moves[0].mv, "D4");
+    }
+
+    #[test]
+    fn move_accuracy_is_high_for_best_moves_and_low_for_blunders() {
+        // No win-rate given up ⇒ ~100% accurate.
+        assert!(move_accuracy(0.0) > 99.0);
+        // A heavy 30-point win-prob drop ⇒ well below half.
+        assert!(move_accuracy(0.30) < 30.0);
+        // Monotone: giving up more is never more accurate.
+        assert!(move_accuracy(0.05) > move_accuracy(0.20));
+        // Always within bounds.
+        assert!((0.0..=100.0).contains(&move_accuracy(1.0)));
+    }
+
+    #[test]
+    fn rank_estimate_gated_by_board_size_and_move_count() {
+        // Too few moves, or a non-19×19 board ⇒ no estimate.
+        assert_eq!(estimate_rank(19, RANK_MIN_MOVES - 1, 1.0), None);
+        assert_eq!(estimate_rank(9, 200, 1.0), None);
+        // A strong, full-size game ⇒ a dan band; a sloppy one ⇒ a kyu band.
+        assert_eq!(estimate_rank(19, 200, 0.9).as_deref(), Some("~5d"));
+        assert_eq!(estimate_rank(19, 200, 5.0).as_deref(), Some("~12k"));
     }
 }
