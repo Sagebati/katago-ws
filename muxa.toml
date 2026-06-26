@@ -86,7 +86,7 @@ visibility_timeout_secs = 120
 # `worker` role only — the orchestrator's cluster WebSocket URL to dial, the secret
 # it presents (must equal the orchestrator's auth_token), and the reconnect backoff.
 # Override via MUXA_WORKER__ORCHESTRATOR_URL / MUXA_WORKER__AUTH_TOKEN.
-orchestrator_url = "wss://orchestrator.abbaye.xyz/cluster"
+orchestrator_url = "ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster"
 auth_token = ""
 reconnect_backoff_secs = 3
 

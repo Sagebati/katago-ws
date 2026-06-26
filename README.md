@@ -101,25 +101,25 @@ argument; the engine binary + model are baked in):
 ```bash
 # CPU (Eigen) build — runs anywhere, no GPU:
 docker run --rm \
-  -e MUXA_WORKER__ORCHESTRATOR_URL=wss://orchestrator.abbaye.xyz/cluster \
+  -e MUXA_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
   -e MUXA_WORKER__AUTH_TOKEN=<cluster-token> \
   -e MUXA_ENGINE__MAX_VISITS=20 \
   ghcr.io/sagebati/katago-ws:latest worker
 
 # NVIDIA GPU — add `--gpus all` and use the :cuda tag:
 docker run --rm --gpus all \
-  -e MUXA_WORKER__ORCHESTRATOR_URL=wss://orchestrator.abbaye.xyz/cluster \
+  -e MUXA_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
   -e MUXA_WORKER__AUTH_TOKEN=<cluster-token> \
   ghcr.io/sagebati/katago-ws:cuda worker
 
 # AMD/Intel/NVIDIA GPU via OpenCL — pass the render device and use the :opencl tag:
 docker run --rm --device /dev/dri \
-  -e MUXA_WORKER__ORCHESTRATOR_URL=wss://orchestrator.abbaye.xyz/cluster \
+  -e MUXA_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
   -e MUXA_WORKER__AUTH_TOKEN=<cluster-token> \
   ghcr.io/sagebati/katago-ws:opencl worker
 ```
 
-`wss://orchestrator.abbaye.xyz/cluster` is the deployed orchestrator (it's
+`ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster` is the deployed orchestrator (it's
 the `[worker].orchestrator_url` default, so a worker dials it even without the env
 var); point `MUXA_WORKER__ORCHESTRATOR_URL` elsewhere to use your own. Set
 `MUXA_WORKER__AUTH_TOKEN` to match the orchestrator's `[orchestrator].auth_token`
@@ -192,19 +192,19 @@ image.
 
 # CPU (Eigen) — any host, no GPU:
 docker run --rm \
-  -e MUXA_WORKER__ORCHESTRATOR_URL=wss://orchestrator.abbaye.xyz/cluster \
+  -e MUXA_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
   -e MUXA_ENGINE__MAX_VISITS=20 \
   ghcr.io/sagebati/katago-ws:latest worker
 
 # NVIDIA GPU (CUDA) — add `--gpus all` (needs the NVIDIA Container Toolkit):
 docker run --rm --gpus all \
-  -e MUXA_WORKER__ORCHESTRATOR_URL=wss://orchestrator.abbaye.xyz/cluster \
+  -e MUXA_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
   -e MUXA_ENGINE__MAX_VISITS=20 \
   ghcr.io/sagebati/katago-ws:cuda worker
 
 # AMD/Intel/NVIDIA GPU (OpenCL) — pass the render node `/dev/dri`:
 docker run --rm --device /dev/dri \
-  -e MUXA_WORKER__ORCHESTRATOR_URL=wss://orchestrator.abbaye.xyz/cluster \
+  -e MUXA_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
   -e MUXA_ENGINE__MAX_VISITS=20 \
   ghcr.io/sagebati/katago-ws:opencl worker
 ```
