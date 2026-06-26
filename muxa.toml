@@ -59,11 +59,11 @@ model = "model.bin.gz"
 # Per-IP rate limit on POST /analyse (the only endpoint that queues KataGo work).
 # In-memory, per instance — a coarse abuse guard, not a global cap (each replica
 # has its own buckets). GCRA quota: one submit allowance restored every
-# `period_ms`, up to `burst` at once → here, 1000 submits per IP per hour: one
-# allowance restored every 3.6s (3_600_000 / 1000), with up to 10 spendable at
+# `period_ms`, up to `burst` at once → here, 100 submits per IP per hour: one
+# allowance restored every 36s (3_600_000 / 100), with up to 10 spendable at
 # once as a burst.
 enabled = true
-period_ms = 3600
+period_ms = 36000
 burst = 10
 # Trust X-Forwarded-For / X-Real-IP for the client IP. Enable ONLY behind a proxy
 # you control (otherwise clients spoof their IP). false → unspoofable peer IP
