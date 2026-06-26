@@ -102,28 +102,26 @@ argument; the engine binary + model are baked in):
 # CPU (Eigen) build — runs anywhere, no GPU:
 docker run --rm \
   -e MUXA_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
-  -e MUXA_WORKER__AUTH_TOKEN=<cluster-token> \
   -e MUXA_ENGINE__MAX_VISITS=20 \
   ghcr.io/sagebati/katago-ws:latest worker
 
 # NVIDIA GPU — add `--gpus all` and use the :cuda tag:
 docker run --rm --gpus all \
   -e MUXA_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
-  -e MUXA_WORKER__AUTH_TOKEN=<cluster-token> \
   ghcr.io/sagebati/katago-ws:cuda worker
 
 # AMD/Intel/NVIDIA GPU via OpenCL — pass the render device and use the :opencl tag:
 docker run --rm --device /dev/dri \
   -e MUXA_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
-  -e MUXA_WORKER__AUTH_TOKEN=<cluster-token> \
   ghcr.io/sagebati/katago-ws:opencl worker
 ```
 
 `ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster` is the deployed orchestrator (it's
 the `[worker].orchestrator_url` default, so a worker dials it even without the env
-var); point `MUXA_WORKER__ORCHESTRATOR_URL` elsewhere to use your own. Set
-`MUXA_WORKER__AUTH_TOKEN` to match the orchestrator's `[orchestrator].auth_token`
-(omit it if the orchestrator runs without auth).
+var); point `MUXA_WORKER__ORCHESTRATOR_URL` elsewhere to use your own. The
+orchestrator runs without auth, so no `MUXA_WORKER__AUTH_TOKEN` is needed — set one
+(matching `[orchestrator].auth_token`) only if you enable it, and front it with TLS
+first, since plain `ws://` would send the token in cleartext.
 
 ```bash
 just test            # cargo nextest run  (cargo test works too)
