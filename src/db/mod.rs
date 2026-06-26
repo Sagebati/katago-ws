@@ -40,9 +40,8 @@ const NON_TERMINAL: [JobStatus; 2] = [JobStatus::Queued, JobStatus::Running];
 /// DEFAULT — `RETURNING` hands it back — and the same transaction enqueues the
 /// work (SGF in the message). One transaction, so a client never gets an id for a
 /// job that isn't both visible and queued.
-pub async fn submit(pool: &DieselPool, sgf: &str) -> AppResult<Uuid> {
+pub async fn submit(pool: &DieselPool, sgf: String) -> AppResult<Uuid> {
     let mut conn = pool.0.get().await.map_err(db_err)?;
-    let sgf = sgf.to_owned();
     conn.transaction::<Uuid, AppError, _>(async move |conn| {
         // All columns default (uuidv7 id, 'queued' status, timestamps, change_seq);
         // RETURNING reads the minted id back.

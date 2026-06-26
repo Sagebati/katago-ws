@@ -39,10 +39,15 @@ use crate::queue::{self, JobMessage};
 pub trait Executor: Send + Sync + 'static {
     /// Analyze `sgf` for `job_id`, yielding the result JSON or an error (a failed
     /// analysis is recorded as a non-terminal attempt and left for redelivery).
+    ///
+    /// `sgf` is taken **by value**: the only owner of the SGF at this point is the
+    /// dequeued message, which `handle` moves straight in. The local executor just
+    /// borrows it for the engine; the remote executor moves it onto the wire — so
+    /// neither path copies the (potentially large) SGF.
     fn analyze(
         &self,
         job_id: Uuid,
-        sgf: &str,
+        sgf: String,
     ) -> impl std::future::Future<Output = AppResult<Json>> + Send;
 }
 
@@ -61,8 +66,8 @@ impl LocalExecutor {
 }
 
 impl Executor for LocalExecutor {
-    async fn analyze(&self, _job_id: Uuid, sgf: &str) -> AppResult<Json> {
-        let analysis = self.engine.analyze(sgf).await?;
+    async fn analyze(&self, _job_id: Uuid, sgf: String) -> AppResult<Json> {
+        let analysis = self.engine.analyze(&sgf).await?;
         serde_json::to_value(&analysis).map_err(|err| AppError::Internal(err.to_string()))
     }
 }
@@ -153,7 +158,10 @@ async fn handle<E: Executor>(
     // non-terminal failure, and the job is redelivered, same as a local crash.)
     let heartbeat = VtHeartbeat::start(db.clone(), msg_id, cfg.visibility_timeout_secs);
     let started = std::time::Instant::now();
-    let result = executor.analyze(job_id, &msg.message.sgf).await;
+    // Move the SGF out of the message (we've already copied job_id/msg_id/read_ct
+    // above and don't touch `msg` again) — the remote executor then ships it onto
+    // the socket without re-copying it.
+    let result = executor.analyze(job_id, msg.message.sgf).await;
     let elapsed = started.elapsed().as_secs_f64();
     drop(heartbeat); // stop re-arming the lock now that analysis is done
 

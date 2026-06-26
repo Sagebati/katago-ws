@@ -24,7 +24,10 @@ sgf-parser = "2"
 # `tokio-tungstenite` (rustls + bundled webpki roots, so `wss://` works behind a
 # TLS terminator like Cloudflare with no system OpenSSL). `rustls` is a direct dep
 # only to install a process-default crypto provider at worker startup.
-tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+# Pinned to 0.29 to match the version axum 0.8's `ws` feature pulls — otherwise the
+# graph compiles two copies of tungstenite/tokio-tungstenite (a binary-size + build
+# -time smell `cargo tree -d` flags).
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 rustls = "0.23"
 futures-util = "0.3"
 # Shared-secret auth token for the (now public) cluster socket — kept redacted.
@@ -76,6 +79,26 @@ uuid = { version = "1", features = ["serde", "v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 tracing = "0.1"
+
+# Release profile. The crate had none → cargo defaults (no LTO, 16 codegen units,
+# unstripped) produced a ~25 MB binary. The wins here are pure size/throughput with
+# no behaviour change:
+#   - `lto = "fat"`        cross-crate inlining + dead-code elimination across the
+#                          (large) dep graph — the main shrink of the 13.5 MB `.text`.
+#                          Use "thin" if CI build time matters more than the last MB.
+#   - `codegen-units = 1`  lets the optimizer see the whole crate; smaller + faster.
+#   - `strip = "debuginfo"` drops DWARF but KEEPS the symbol table, so panic/error
+#                          backtraces stay symbolicated (the "tracerror" requirement).
+#                          `strip = "symbols"` would save ~6 MB more but unsymbolicates
+#                          local backtraces (fine only if Sentry has the debug files).
+# `panic` is deliberately left at "unwind": a panicking task/request is isolated
+# (axum catch-panic, pgmq redelivery) rather than aborting the process, and the
+# Sentry panic hook still records it. "abort" would save ~2.5 MB of unwind tables
+# but at the cost of that isolation.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "debuginfo"
 
 # A curated subset of clippy's `restriction` group. The group as a whole is too
 # noisy to enforce (clippy itself recommends enabling these individually), so we

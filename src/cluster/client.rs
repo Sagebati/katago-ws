@@ -47,8 +47,9 @@ type SessionError = Box<dyn std::error::Error + Send + Sync>;
 /// Mount the worker client as a background task bound to the app's shutdown token.
 pub fn register_client(ctx: &mut BuildCtx, engine: Arc<AnalysisEngine>, cfg: WorkerConfig) {
     // tokio-tungstenite's rustls connector needs a process-default crypto provider
-    // for `wss://`; the dep graph carries both aws-lc-rs and ring, so install one
-    // explicitly (idempotent — ignore the "already installed" error).
+    // for `wss://`. The graph carries a single provider (aws-lc-rs); install it
+    // explicitly rather than relying on rustls's implicit default (idempotent —
+    // ignore the "already installed" error).
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     ctx.tasks
         .spawn("cluster-ws-client", move |shutdown| async move {

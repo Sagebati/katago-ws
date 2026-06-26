@@ -227,12 +227,14 @@ struct RemoteExecutor {
 }
 
 impl Executor for RemoteExecutor {
-    async fn analyze(&self, job_id: Uuid, sgf: &str) -> AppResult<Json> {
+    async fn analyze(&self, job_id: Uuid, sgf: String) -> AppResult<Json> {
         let (tx, rx) = oneshot::channel();
         // Register the waiter before sending, so a fast result can't race us.
         self.pending.lock().await.insert(job_id, tx);
 
-        let request = JobRequest { job_id, sgf: sgf.to_owned() };
+        // `sgf` is owned (moved out of the dequeued message) → straight onto the
+        // wire, no copy.
+        let request = JobRequest { job_id, sgf };
         if self.out_tx.send(request).await.is_err() {
             self.pending.lock().await.remove(&job_id);
             return Err(AppError::Queue("worker socket closed before dispatch".to_owned()));

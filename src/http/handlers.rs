@@ -225,8 +225,10 @@ pub async fn submit(
     sgf_parser::parse(&body).map_err(|err| AppError::Sgf(err.to_string()))?;
 
     // The database mints the (time-ordered v7) id and enqueues the work in one
-    // transaction; we just return the id it hands back.
-    let job_id = db::submit(&api.db, &body).await?;
+    // transaction; we just return the id it hands back. `body` is owned and unused
+    // after this, so it moves straight into the queue message — no extra copy of
+    // the (potentially large) SGF.
+    let job_id = db::submit(&api.db, body).await?;
 
     Ok((
         StatusCode::ACCEPTED,
