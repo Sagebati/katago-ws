@@ -94,6 +94,37 @@ A Postgres database named `goban` is required for `standalone`/`orchestrator`
 embedded and applied at startup — don't run them by hand. The `worker` role needs
 no database.
 
+To run a **worker** from the published image — no build, no Postgres, just KataGo
+dialing the deployed orchestrator over `wss://` (the `worker` is the final image
+argument; the engine binary + model are baked in):
+
+```bash
+# CPU (Eigen) build — runs anywhere, no GPU:
+docker run --rm \
+  -e MUXA_WORKER__ORCHESTRATOR_URL=wss://orchestrator.abbaye.xyz/cluster \
+  -e MUXA_WORKER__AUTH_TOKEN=<cluster-token> \
+  -e MUXA_ENGINE__MAX_VISITS=20 \
+  ghcr.io/sagebati/katago-ws:latest worker
+
+# NVIDIA GPU — add `--gpus all` and use the :cuda tag:
+docker run --rm --gpus all \
+  -e MUXA_WORKER__ORCHESTRATOR_URL=wss://orchestrator.abbaye.xyz/cluster \
+  -e MUXA_WORKER__AUTH_TOKEN=<cluster-token> \
+  ghcr.io/sagebati/katago-ws:cuda worker
+
+# AMD/Intel/NVIDIA GPU via OpenCL — pass the render device and use the :opencl tag:
+docker run --rm --device /dev/dri \
+  -e MUXA_WORKER__ORCHESTRATOR_URL=wss://orchestrator.abbaye.xyz/cluster \
+  -e MUXA_WORKER__AUTH_TOKEN=<cluster-token> \
+  ghcr.io/sagebati/katago-ws:opencl worker
+```
+
+`wss://orchestrator.abbaye.xyz/cluster` is the deployed orchestrator (it's
+the `[worker].orchestrator_url` default, so a worker dials it even without the env
+var); point `MUXA_WORKER__ORCHESTRATOR_URL` elsewhere to use your own. Set
+`MUXA_WORKER__AUTH_TOKEN` to match the orchestrator's `[orchestrator].auth_token`
+(omit it if the orchestrator runs without auth).
+
 ```bash
 just test            # cargo nextest run  (cargo test works too)
 cargo clippy         # lints are enforced
@@ -156,11 +187,26 @@ A host that can't build the Dockerfile (it needs the sibling crates) just pulls 
 image.
 
 ```bash
-# Run a worker anywhere, pointed at a deployed orchestrator:
+# Run a worker from any of the three images, pointed at a deployed orchestrator —
+# pick the tag for the host's accelerator; the run flags differ per backend.
+
+# CPU (Eigen) — any host, no GPU:
 docker run --rm \
-  -e MUXA_WORKER__ORCHESTRATOR_URL=wss://your-orchestrator/cluster \
+  -e MUXA_WORKER__ORCHESTRATOR_URL=wss://orchestrator.abbaye.xyz/cluster \
   -e MUXA_ENGINE__MAX_VISITS=20 \
   ghcr.io/sagebati/katago-ws:latest worker
+
+# NVIDIA GPU (CUDA) — add `--gpus all` (needs the NVIDIA Container Toolkit):
+docker run --rm --gpus all \
+  -e MUXA_WORKER__ORCHESTRATOR_URL=wss://orchestrator.abbaye.xyz/cluster \
+  -e MUXA_ENGINE__MAX_VISITS=20 \
+  ghcr.io/sagebati/katago-ws:cuda worker
+
+# AMD/Intel/NVIDIA GPU (OpenCL) — pass the render node `/dev/dri`:
+docker run --rm --device /dev/dri \
+  -e MUXA_WORKER__ORCHESTRATOR_URL=wss://orchestrator.abbaye.xyz/cluster \
+  -e MUXA_ENGINE__MAX_VISITS=20 \
+  ghcr.io/sagebati/katago-ws:opencl worker
 ```
 
 ## Deployment
