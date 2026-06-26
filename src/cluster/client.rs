@@ -148,7 +148,7 @@ impl WorkerClient {
             () = self.shutdown.cancelled() => State::Stopped,
             result = self.dial() => match result {
                 Ok(session) => {
-                    tracing::info!("connected to orchestrator");
+                    tracing::info!(slots = self.slots, "connected to orchestrator; waiting for jobs");
                     State::Serving(Box::new(session))
                 }
                 Err(err) => {
@@ -226,15 +226,31 @@ impl WorkerClient {
     /// Accept one job: take a slot (back-pressuring the inbound read), then run the
     /// analysis off-loop and post the result to the outbound channel.
     async fn dispatch(&self, job: JobRequest, out_tx: &mpsc::Sender<ClientMsg>) {
+        let job_id = job.job_id;
+        // If every slot is busy this parks until one frees — log it so a lull where
+        // a job arrived but hasn't started is visible rather than silent.
+        if self.limiter.available_permits() == 0 {
+            tracing::info!(%job_id, slots = self.slots, "all slots busy; waiting for one to free");
+        }
         let Ok(permit) = Arc::clone(&self.limiter).acquire_owned().await else {
             return; // semaphore closed — only on shutdown teardown
         };
+        let in_use = self.slots - self.limiter.available_permits() as u32;
+        tracing::info!(%job_id, in_use, slots = self.slots, "job taken; running analysis");
         let engine = Arc::clone(&self.engine);
         let out_tx = out_tx.clone();
         tokio::spawn(async move {
             let _permit = permit; // released when the analysis finishes
+            let started = std::time::Instant::now();
             let outcome = Self::run_job(&engine, &job.sgf).await;
-            let reply = ClientMsg::Result { job_id: job.job_id, outcome };
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            match &outcome {
+                Outcome::Ok(_) => tracing::info!(%job_id, elapsed_ms, "analysis done; sending result"),
+                Outcome::Err(error) => {
+                    tracing::warn!(%job_id, elapsed_ms, %error, "analysis failed; sending error");
+                }
+            }
+            let reply = ClientMsg::Result { job_id, outcome };
             // Best-effort: if the session is gone, the pgmq lease redelivers.
             drop(out_tx.send(reply).await);
         });
