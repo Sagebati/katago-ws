@@ -14,6 +14,9 @@
 //!   cluster socket.
 //! - `worker` — runs KataGo and dials the orchestrator's cluster WebSocket; has
 //!   **no** Postgres access. Serves only `/health` (for liveness/readiness probes).
+//!   Pass `--diagnose` (or set `KATAGO_WS_DIAGNOSE`) to instead run a single
+//!   built-in analysis, log the outcome, and exit (0 ok / non-zero fail) — a
+//!   one-shot preflight for "does analysis work on this machine?".
 //!
 //! `orchestrator` + N `worker`s let the two tiers scale independently when the
 //! workers can't reach Postgres directly (the queue lease still lives on the
@@ -61,8 +64,11 @@ impl Role {
     /// argv is awkward — e.g. a Cloudflare Container, whose command is fixed by
     /// the image `ENTRYPOINT`); if neither is set, [`Role::Standalone`].
     fn resolve() -> Result<Self, String> {
+        // The role is the first *non-flag* argument, so `worker --diagnose` (and any
+        // future flags) resolve the role correctly regardless of flag order.
         let raw = std::env::args()
-            .nth(1)
+            .skip(1)
+            .find(|arg| !arg.starts_with("--"))
             .or_else(|| std::env::var("KATAGO_WS_ROLE").ok());
         match raw.as_deref() {
             None | Some("standalone") => Ok(Self::Standalone),
@@ -84,6 +90,14 @@ async fn main() -> muxa::Result<()> {
         Role::Orchestrator => run_orchestrator().await,
         Role::Worker => run_worker().await,
     }
+}
+
+/// Whether the worker should run the one-shot diagnostic instead of dialing the
+/// orchestrator: the `--diagnose` flag (any position) or the `KATAGO_WS_DIAGNOSE`
+/// env var (handy where argv is fixed by an image entrypoint).
+fn diagnose_requested() -> bool {
+    std::env::args().any(|arg| arg == "--diagnose")
+        || std::env::var_os("KATAGO_WS_DIAGNOSE").is_some()
 }
 
 /// `standalone`: the original single-process deployment — web API and in-process
@@ -167,6 +181,14 @@ async fn run_worker() -> muxa::Result<()> {
         .await?;
 
     let engine = Arc::clone(Selector::<Arc<AnalysisEngine>, _>::select(app.state()));
+
+    // `worker --diagnose`: a one-shot engine preflight. Run a single built-in
+    // analysis and exit instead of dialing the orchestrator — no cluster client,
+    // no `/health` server.
+    if diagnose_requested() {
+        return run_diagnose(&engine).await;
+    }
+
     let worker_cfg = extract::<WorkerConfig>(&app, "worker");
 
     let mut app = app;
@@ -176,6 +198,30 @@ async fn run_worker() -> muxa::Result<()> {
         .await?
         .run()
         .await
+}
+
+/// A one-shot worker preflight (`worker --diagnose`): run a single built-in
+/// analysis through an already-launched engine, log the outcome, and return — `Ok`
+/// (exit 0) on success, `Err` (non-zero) on failure, so it can gate a deploy or a
+/// `docker run` smoke test.
+async fn run_diagnose(engine: &AnalysisEngine) -> muxa::Result<()> {
+    /// A tiny 9×9 game — enough to exercise SGF parse → KataGo → annotate without
+    /// the latency of a full 19×19 analysis.
+    const SAMPLE_SGF: &str = "(;GM[1]SZ[9]KM[6.5]RU[Japanese];B[ee];W[gg];B[cc])";
+
+    tracing::info!("running diagnostic analysis");
+    let started = std::time::Instant::now();
+    let analysis = engine.analyze(SAMPLE_SGF).await.map_err(|err| {
+        tracing::error!(error = %err, "diagnose FAILED: analysis errored");
+        Error::other(err)
+    })?;
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        board_size = analysis.board_size,
+        moves = analysis.moves.len(),
+        "diagnose OK: analysis works on this machine"
+    );
+    Ok(())
 }
 
 /// Finish + serve the aide API (shared by `standalone` and `orchestrator`). `ApiPlugin`

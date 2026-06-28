@@ -27,6 +27,7 @@ Run from the `katago-ws/` directory. The build needs the sibling `../muxa` and
 cargo run                      # standalone: web + in-process workers
 cargo run -- orchestrator      # web + pgmq + cluster dispatcher, no engine
 cargo run -- worker            # KataGo + cluster client, no Postgres
+cargo run -- worker --diagnose # one-shot: run a built-in analysis & exit (engine preflight)
 
 cargo build                    # CI/Docker use `cargo build --release --locked`
 cargo clippy                   # lints are enforced — see Conventions
@@ -70,7 +71,10 @@ config — see `Role::resolve` in [`src/main.rs`](src/main.rs):
 - **`orchestrator`** — web API + pgmq + the cluster dispatcher; **no engine**.
   Owns the DB and proxies work to remote workers.
 - **`worker`** — runs KataGo and dials the orchestrator; **no Postgres**. Serves
-  only `/health`.
+  only `/health`. Pass `--diagnose` (or set `KATAGO_WS_DIAGNOSE`) to instead run
+  one built-in analysis, log the outcome, and exit (0 ok / non-zero fail) — a
+  preflight smoke test for "does analysis work on this machine?", needing no
+  orchestrator.
 
 `orchestrator` + N `worker`s scale the API and the engine independently when
 workers can't reach Postgres. The pgmq lease always stays on the orchestrator, so a

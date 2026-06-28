@@ -49,6 +49,10 @@ The role is the **first CLI argument** (or the `KATAGO_WS_ROLE` env var):
 | **`orchestrator`** | web API + pgmq + the cluster dispatcher | ✓ | ✗ |
 | **`worker`** | KataGo + cluster client (dials the orchestrator) | ✗ | ✓ |
 
+The `worker` also takes a `--diagnose` flag (or `KATAGO_WS_DIAGNOSE` env var): instead
+of dialing the orchestrator it runs one built-in analysis and exits — `0` on success,
+non-zero on failure — a preflight check that KataGo works on the machine.
+
 `orchestrator` + N `worker`s let the API and the engine scale independently when
 workers can't reach Postgres directly. Workers connect over a **WebSocket** at
 `GET /cluster` on the orchestrator's web port (a shared Bearer token authenticates
@@ -87,6 +91,7 @@ docker compose up --build
 cargo run                   # standalone — migrations apply automatically at startup
 cargo run -- orchestrator   # web + pgmq + cluster dispatcher (no engine)
 cargo run -- worker         # KataGo + cluster client (no Postgres)
+cargo run -- worker --diagnose   # one-shot: run a built-in analysis, print the result, exit
 ```
 
 A Postgres database named `goban` is required for `standalone`/`orchestrator`
@@ -122,6 +127,36 @@ var); point `MUXA_WORKER__ORCHESTRATOR_URL` elsewhere to use your own. The
 orchestrator runs without auth, so no `MUXA_WORKER__AUTH_TOKEN` is needed — set one
 (matching `[orchestrator].auth_token`) only if you enable it, and front it with TLS
 first, since plain `ws://` would send the token in cleartext.
+
+Before pointing a new machine at the orchestrator, run the image with
+**`worker --diagnose`** to confirm KataGo actually works there (GPU drivers, model,
+instruction set) — it runs a single built-in analysis and exits non-zero on failure,
+so it's a clean smoke test or CI/deploy gate (no orchestrator or Postgres needed):
+
+```bash
+docker run --rm --gpus all ghcr.io/sagebati/katago-ws:cuda worker --diagnose
+```
+
+On the GPU images, `--diagnose` also performs KataGo's one-time OpenCL/CUDA
+**tuning**, which is slow and cached *inside the container*. Drop `--rm`, then
+`docker commit` the tuned container into a new image and push it — every worker
+started from that image skips re-tuning and is ready instantly:
+
+```bash
+# 1. Run the preflight in a named container (no --rm) so it persists after exit.
+docker run --name katago-tune --device /dev/dri \
+  ghcr.io/sagebati/katago-ws:opencl worker --diagnose
+
+# 2. Snapshot the tuned container into your own image and push it.
+docker commit katago-tune ghcr.io/sagebati/katago-ws:opencl-tuned
+docker push ghcr.io/sagebati/katago-ws:opencl-tuned
+docker rm katago-tune
+
+# 3. Workers from the tuned image start without re-tuning.
+docker run --rm --device /dev/dri \
+  -e MUXA_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
+  ghcr.io/sagebati/katago-ws:opencl-tuned worker
+```
 
 ```bash
 just test            # cargo nextest run  (cargo test works too)
