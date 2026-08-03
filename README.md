@@ -110,11 +110,16 @@ docker run --rm --gpus all \
   -e MUXA_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
   ghcr.io/sagebati/katago-ws:cuda worker
 
-# AMD/Intel/NVIDIA GPU via OpenCL — pass the render device and use the :opencl tag:
+# AMD/Intel GPU via OpenCL — pass the render device and use the :opencl tag:
 docker run --rm --device /dev/dri \
   -e MUXA_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
   ghcr.io/sagebati/katago-ws:opencl worker
 ```
+
+The OpenCL image drives the GPU through Mesa's **rusticl** (`RUSTICL_ENABLE=radeonsi,iris`
+is baked in; override the build arg for another gallium driver). Mesa's older
+Clover is deliberately absent — it can't build KataGo's kernels on RDNA2 and
+newer. NVIDIA cards should use the `:cuda` tag rather than OpenCL.
 
 `ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster` is the deployed orchestrator (it's
 the `[worker].orchestrator_url` default, so a worker dials it even without the env
@@ -200,7 +205,7 @@ docker run --rm --gpus all \
   -e MUXA_ENGINE__MAX_VISITS=20 \
   ghcr.io/sagebati/katago-ws:cuda worker
 
-# AMD/Intel/NVIDIA GPU (OpenCL) — pass the render node `/dev/dri`:
+# AMD/Intel GPU (OpenCL) — pass the render node `/dev/dri`:
 docker run --rm --device /dev/dri \
   -e MUXA_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
   -e MUXA_ENGINE__MAX_VISITS=20 \

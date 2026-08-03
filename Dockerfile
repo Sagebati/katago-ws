@@ -73,10 +73,18 @@ RUN curl -fsSL -o katago.zip \
 ###############################################################################
 FROM ${RUNTIME_BASE} AS runtime
 ARG RUNTIME_PKGS
+ARG RUSTICL_DRIVERS=none
 
 RUN apt-get update && apt-get install -y --no-install-recommends ${RUNTIME_PKGS} \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 10001 app
+    && useradd --create-home --uid 10001 app \
+    # Mesa ships two OpenCL implementations and enumerates the deprecated one
+    # (Clover) first, so KataGo's "device 0" lands on it. On RDNA2+ Clover
+    # either can't build kernels at all or loses the GPU context mid-tune. Drop
+    # its ICD so rusticl is the only Mesa OpenCL on offer; rusticl covers the
+    # same gallium drivers, GCN onward. A no-op on the CPU/CUDA images, which
+    # have no Mesa.
+    && rm -f /etc/OpenCL/vendors/mesa.icd
 
 COPY --from=builder /usr/local/bin/katago-ws /usr/local/bin/katago-ws
 COPY --from=katago /kata/katago           /opt/katago/katago
@@ -91,7 +99,10 @@ USER app
 # APPIMAGE_EXTRACT_AND_RUN makes it extract-and-run instead of self-mounting
 # (else "Cannot mount AppImage"). Baked in so every engine role (standalone,
 # worker) works out of the box — no per-deploy env needed.
-ENV MUXA_CONFIG=/app/muxa.toml \
+# rusticl only exposes a driver it has been asked for by name. `none` on the
+# CPU/CUDA images, where there is no rusticl to configure.
+ENV RUSTICL_ENABLE=${RUSTICL_DRIVERS} \
+    MUXA_CONFIG=/app/muxa.toml \
     MUXA_WEB__HOST=0.0.0.0 \
     MUXA_WEB__PORT=3000 \
     MUXA_ENGINE__BINARY=/opt/katago/katago \
