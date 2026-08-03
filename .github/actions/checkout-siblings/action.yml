@@ -10,7 +10,11 @@ runs:
   steps:
     - name: Load pinned sibling refs
       shell: bash
-      run: cat "${{ github.action_path }}/../../sibling-refs.env" >> "$GITHUB_ENV"
+      # $GITHUB_ENV is a `KEY=value` env file, not a shell dotenv — it has no
+      # comment syntax, so sibling-refs.env's leading `#` lines (and any blank
+      # lines) must be stripped before appending, or the runner rejects the
+      # whole file with "Invalid format".
+      run: grep -v '^\s*#' "${{ github.action_path }}/../../sibling-refs.env" | grep -v '^\s*$' >> "$GITHUB_ENV"
 
     - name: Checkout muxa (sibling build-context crate, pinned)
       uses: actions/checkout@v4

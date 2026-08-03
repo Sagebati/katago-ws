@@ -101,7 +101,7 @@ fn render_index(
                         "<tr><td class=\"mono\">{}</td>\
                          <td class=\"mono muted\">#{}</td><td>{}</td>\
                          <td class=\"muted\">{}</td></tr>",
-                        worker.name,
+                        html_escape(&worker.name),
                         worker.id,
                         worker.slots,
                         ago(worker.connected_at),
@@ -167,6 +167,28 @@ fn render_index(
 
     html.push_str(INDEX_FOOT);
     html
+}
+
+/// Escape text for safe interpolation into the dashboard's HTML.
+///
+/// `worker.name` is chosen by whatever connects to `/cluster` — the orchestrator
+/// authenticates the socket (when a token is configured) but never validates or
+/// sanitizes the announced name, and the token is empty (auth disabled) by
+/// default. Without this, a worker naming itself e.g. `<script>…</script>`
+/// would get that markup executed in the browser of anyone viewing `/`.
+fn html_escape(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 /// Compact "time since" label for a timestamp (`45s`, `3m 12s`, `2h 5m`, `4d 1h`).
@@ -456,5 +478,23 @@ mod tests {
         let html = render_index(Some(&[]), &[], 0, &[]);
         assert!(html.contains("No workers connected."));
         assert!(html.contains("<h2>Queue <span class=\"count\">0</span>"));
+    }
+
+    /// A worker picks its own `name` (announced in its `Hello`, unauthenticated
+    /// when no cluster token is configured) and it lands on the dashboard
+    /// verbatim otherwise — so an attacker-controlled name must render as inert
+    /// text, not markup.
+    #[test]
+    fn dashboard_escapes_a_hostile_worker_name() {
+        let workers = vec![WorkerInfo {
+            id: 1,
+            name: "<script>alert(1)</script>".to_owned(),
+            peer: None,
+            slots: 1,
+            connected_at: Utc::now(),
+        }];
+        let html = render_index(Some(&workers), &[], 0, &[]);
+        assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
     }
 }
