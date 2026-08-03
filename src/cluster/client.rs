@@ -61,12 +61,12 @@ pub fn register_client(ctx: &mut BuildCtx, engine: Arc<AnalysisEngine>, cfg: Wor
 /// unset — so a freshly-deployed worker still shows up legibly in `/workers`.
 fn generate_name() -> String {
     const ADJECTIVES: [&str; 16] = [
-        "brave", "calm", "clever", "eager", "fuzzy", "gentle", "jolly", "keen",
-        "lucky", "mighty", "nimble", "proud", "quick", "sly", "witty", "zesty",
+        "brave", "calm", "clever", "eager", "fuzzy", "gentle", "jolly", "keen", "lucky", "mighty",
+        "nimble", "proud", "quick", "sly", "witty", "zesty",
     ];
     const ANIMALS: [&str; 16] = [
-        "otter", "fox", "panda", "heron", "lynx", "koi", "wren", "ibex",
-        "gecko", "raven", "mole", "tapir", "yak", "quokka", "civet", "shrew",
+        "otter", "fox", "panda", "heron", "lynx", "koi", "wren", "ibex", "gecko", "raven", "mole",
+        "tapir", "yak", "quokka", "civet", "shrew",
     ];
     let bytes = uuid::Uuid::new_v4().into_bytes();
     let adjective = ADJECTIVES[usize::from(bytes[0]) % ADJECTIVES.len()];
@@ -122,8 +122,20 @@ impl WorkerClient {
         let slots = u32::try_from(cfg.concurrency.max(1)).unwrap_or(u32::MAX);
         let backoff = Duration::from_secs(cfg.reconnect_backoff_secs.max(1));
         let limiter = Arc::new(Semaphore::new(slots as usize));
-        let name = if cfg.name.is_empty() { generate_name() } else { cfg.name.clone() };
-        Self { engine, cfg, name, slots, backoff, limiter, shutdown }
+        let name = if cfg.name.is_empty() {
+            generate_name()
+        } else {
+            cfg.name.clone()
+        };
+        Self {
+            engine,
+            cfg,
+            name,
+            slots,
+            backoff,
+            limiter,
+            shutdown,
+        }
     }
 
     /// Drive the state machine until it reaches [`State::Stopped`].
@@ -162,7 +174,12 @@ impl WorkerClient {
     /// `Serving`: drive the single I/O loop — send finished results, receive pushed
     /// jobs, answer pings — until the socket ends or shutdown.
     async fn on_serving(&self, session: Box<Session>) -> State {
-        let Session { mut sink, mut stream, out_tx, mut out_rx } = *session;
+        let Session {
+            mut sink,
+            mut stream,
+            out_tx,
+            mut out_rx,
+        } = *session;
         loop {
             tokio::select! {
                 () = self.shutdown.cancelled() => return State::Stopped,
@@ -209,18 +226,28 @@ impl WorkerClient {
         let token = self.cfg.auth_token.expose_secret();
         if !token.is_empty() {
             let value = format!("Bearer {token}").parse::<http::HeaderValue>()?;
-            request.headers_mut().insert(http::header::AUTHORIZATION, value);
+            request
+                .headers_mut()
+                .insert(http::header::AUTHORIZATION, value);
         }
 
         let (socket, _response) = connect_async(request).await?;
         let (mut sink, stream) = socket.split();
 
         // Hello first, before any job can arrive.
-        let hello = serde_json::to_string(&ClientMsg::Hello { slots: self.slots, name: self.name.clone() })?;
+        let hello = serde_json::to_string(&ClientMsg::Hello {
+            slots: self.slots,
+            name: self.name.clone(),
+        })?;
         sink.send(Message::Text(hello.into())).await?;
 
         let (out_tx, out_rx) = mpsc::channel::<ClientMsg>(self.slots as usize + 1);
-        Ok(Session { sink, stream, out_tx, out_rx })
+        Ok(Session {
+            sink,
+            stream,
+            out_tx,
+            out_rx,
+        })
     }
 
     /// Accept one job: take a slot (back-pressuring the inbound read), then run the
@@ -245,7 +272,9 @@ impl WorkerClient {
             let outcome = Self::run_job(&engine, &job.sgf).await;
             let elapsed_ms = started.elapsed().as_millis() as u64;
             match &outcome {
-                Outcome::Ok(_) => tracing::info!(%job_id, elapsed_ms, "analysis done; sending result"),
+                Outcome::Ok(_) => {
+                    tracing::info!(%job_id, elapsed_ms, "analysis done; sending result")
+                }
                 Outcome::Err(error) => {
                     tracing::warn!(%job_id, elapsed_ms, %error, "analysis failed; sending error");
                 }

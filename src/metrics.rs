@@ -75,12 +75,14 @@ impl Metrics {
     /// is the analysis wall-time when one ran (`None` for the poison/max-attempts
     /// path, which gives up before analyzing).
     pub fn job_processed(&self, outcome: &'static str, duration: Option<f64>) {
-        self.jobs_processed.add(1, &[KeyValue::new("outcome", outcome)]);
+        self.jobs_processed
+            .add(1, &[KeyValue::new("outcome", outcome)]);
         sentry::metrics::counter(NAME_PROCESSED, 1.0)
             .attribute("outcome", outcome)
             .capture();
         if let Some(secs) = duration {
-            self.job_duration.record(secs, &[KeyValue::new("outcome", outcome)]);
+            self.job_duration
+                .record(secs, &[KeyValue::new("outcome", outcome)]);
             sentry::metrics::distribution(NAME_DURATION, secs)
                 .unit("second")
                 .attribute("outcome", outcome)
@@ -125,8 +127,9 @@ pub fn metrics() -> &'static Metrics {
 ///
 /// Only the DB-owning roles (`standalone` / `orchestrator`) should call this.
 pub fn spawn_queue_depth_sampler(ctx: &mut BuildCtx, db: DieselPool) {
-    ctx.tasks
-        .spawn("jobs-waiting-sampler", move |shutdown: ShutdownToken| async move {
+    ctx.tasks.spawn(
+        "jobs-waiting-sampler",
+        move |shutdown: ShutdownToken| async move {
             let metrics = metrics();
             loop {
                 match db::count_in_state(&db, JobStatus::Queued).await {
@@ -138,5 +141,6 @@ pub fn spawn_queue_depth_sampler(ctx: &mut BuildCtx, db: DieselPool) {
                     () = tokio::time::sleep(QUEUE_SAMPLE_INTERVAL) => {}
                 }
             }
-        });
+        },
+    );
 }

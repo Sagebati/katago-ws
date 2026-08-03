@@ -3,10 +3,10 @@
 // Bring the re-exported aide into scope as `aide`: the `OperationIo` derive
 // (and its `output_with`) expand to relative `aide::OperationInput`/`Output`
 // paths, which resolve through this — so no direct `aide` dependency is needed.
-use muxa::aide::{self, OperationIo};
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use muxa::aide::{self, OperationIo};
 use schemars::JsonSchema;
 use serde::Serialize;
 

@@ -74,7 +74,12 @@ impl Executor for LocalExecutor {
 
 /// Spawn `cfg.concurrency` local worker loops on the build context's task
 /// registry (the `standalone` role: web + in-process workers in one process).
-pub fn register(ctx: &mut BuildCtx, db: DieselPool, engine: Arc<AnalysisEngine>, cfg: WorkerConfig) {
+pub fn register(
+    ctx: &mut BuildCtx,
+    db: DieselPool,
+    engine: Arc<AnalysisEngine>,
+    cfg: WorkerConfig,
+) {
     let n = cfg.concurrency.max(1);
     for _ in 0..n {
         let db = db.clone();
@@ -98,7 +103,10 @@ pub async fn worker_loop<E: Executor>(
     shutdown: ShutdownToken,
 ) {
     let poll = Duration::from_secs(cfg.poll_secs.max(1));
-    tracing::info!(queue = queue::Queue::Analysis.as_str(), "analysis worker started");
+    tracing::info!(
+        queue = queue::Queue::Analysis.as_str(),
+        "analysis worker started"
+    );
     loop {
         tokio::select! {
             () = shutdown.cancelled() => {
