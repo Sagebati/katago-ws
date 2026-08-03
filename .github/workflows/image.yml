@@ -4,14 +4,18 @@
 # PARENT context (a one-repo clone doesn't have them).
 #
 # One Dockerfile, three KataGo binaries — built as a matrix, one image per
-# backend (mirrors the `justfile` build-arg trios, the local source of truth):
+# backend, derived from `just print-matrix` (the justfile is the single source
+# of truth for the variant trios; see also .github/workflows/release.yml, which
+# reuses the same matrix for tag-triggered versioned releases):
 #
 #   :cpu     Eigen     — pure CPU, no GPU            (also tagged :latest)
 #   :cuda    CUDA      — NVIDIA GPU (needs --gpus)
-#   :opencl  OpenCL    — AMD/Intel/NVIDIA GPU (--device /dev/dri)
+#   :opencl  OpenCL    — AMD/Intel GPU (--device /dev/dri)
 #
 # Each is also tagged :<variant>-<commit-sha>. The CPU image is :latest because
-# it runs anywhere (no GPU runtime required).
+# it runs anywhere (no GPU runtime required). This workflow only handles the
+# rolling main-push path; versioned (:variant-vX.Y.Z) images + the binary
+# release come from release.yml on a `v*.*.*` tag push.
 name: image
 
 on:
@@ -20,7 +24,29 @@ on:
   workflow_dispatch:
 
 jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      katago_version: ${{ steps.matrix.outputs.katago_version }}
+    steps:
+      - name: Checkout katago-ws
+        uses: actions/checkout@v4
+        with:
+          path: katago-ws
+
+      - uses: extractions/setup-just@v3
+
+      - name: Emit build matrix from the justfile
+        id: matrix
+        working-directory: katago-ws
+        run: |
+          json="$(just print-matrix)"
+          echo "matrix=$(echo "$json" | jq -c '{include}')" >> "$GITHUB_OUTPUT"
+          echo "katago_version=$(echo "$json" | jq -r '.katago_version')" >> "$GITHUB_OUTPUT"
+
   build-push:
+    needs: matrix
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -28,23 +54,7 @@ jobs:
     strategy:
       # Don't cancel the other backends if one fails to build.
       fail-fast: false
-      matrix:
-        include:
-          # CPU (Eigen) — pure Debian, no GPU. Tagged :latest.
-          - variant: cpu
-            base: debian:bookworm-slim
-            zip: katago-v1.16.5-eigen-linux-x64.zip
-            pkgs: ca-certificates
-          # NVIDIA CUDA. Base + KataGo build agree on CUDA/cuDNN versions.
-          - variant: cuda
-            base: nvidia/cuda:12.8.0-cudnn-runtime-ubuntu24.04
-            zip: katago-v1.16.5-cuda12.8-cudnn9.8.0-linux-x64.zip
-            pkgs: ca-certificates
-          # OpenCL — AMD/Intel/NVIDIA GPUs via the Mesa rusticl ICD.
-          - variant: opencl
-            base: debian:bookworm-slim
-            zip: katago-v1.16.5-opencl-linux-x64.zip
-            pkgs: ca-certificates ocl-icd-libopencl1 mesa-opencl-icd clinfo
+      matrix: ${{ fromJson(needs.matrix.outputs.matrix) }}
     steps:
       - name: Free runner disk (image bundles KataGo + a model + a release build)
         run: |
@@ -57,19 +67,8 @@ jobs:
         with:
           path: katago-ws
 
-      - name: Checkout muxa (sibling build-context crate)
-        uses: actions/checkout@v4
-        with:
-          repository: Sagebati/muxa
-          ref: main
-          path: muxa
-
-      - name: Checkout pgmq fork (sibling crate, pinned to muxa's git rev)
-        uses: actions/checkout@v4
-        with:
-          repository: Sagebati/pgmq
-          ref: e243a26a60a0c3a43eefca2051156556715e875e
-          path: pgmq
+      - name: Checkout siblings (muxa, pgmq)
+        uses: ./katago-ws/.github/actions/checkout-siblings
 
       - name: Scope the Docker build context
         run: |
@@ -109,11 +108,14 @@ jobs:
         with:
           context: .
           file: katago-ws/Dockerfile
+          target: runtime
           push: true
           build-args: |
             RUNTIME_BASE=${{ matrix.base }}
+            KATAGO_VERSION=${{ needs.matrix.outputs.katago_version }}
             KATAGO_ZIP=${{ matrix.zip }}
             RUNTIME_PKGS=${{ matrix.pkgs }}
+            RUSTICL_DRIVERS=${{ matrix.rusticl }}
           tags: ${{ steps.tags.outputs.tags }}
           # Per-variant scope: the heavy (and identical) Rust builder stage is
           # reused run-over-run without the three concurrent jobs racing on one

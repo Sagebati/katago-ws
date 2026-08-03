@@ -189,6 +189,26 @@ all three to `ghcr.io/sagebati/katago-ws` on every push to `main` (`:latest` = C
 A host that can't build the Dockerfile (it needs the sibling crates) just pulls the
 image.
 
+## Releases
+
+[release-plz](https://release-plz.dev) drives versioning from Conventional Commit PR
+titles: merging PRs to `main` keeps a "chore: release vX.Y.Z" PR up to date
+(`Cargo.toml` + [`CHANGELOG.md`](CHANGELOG.md)); merging *that* PR cuts a `vX.Y.Z` git
+tag and a GitHub Release.
+
+A `vX.Y.Z` tag triggers [`.github/workflows/release.yml`](.github/workflows/release.yml),
+which compiles the `x86_64-unknown-linux-gnu` binary once and reuses it for:
+
+- Versioned images: `ghcr.io/sagebati/katago-ws:{cpu,cuda,opencl}-vX.Y.Z`
+- A binary asset on the GitHub Release: `katago-ws-x86_64-unknown-linux-gnu.tar.gz`
+  (+ a `.sha256` checksum)
+
+This is purely additive — the rolling `:cpu`/`:cuda`/`:opencl`/`:latest`/`:<variant>-<sha>`
+tags that `image.yml` produces on every `main` push, and the Coolify deploy that
+tracks `:latest`, are unchanged. Versioned tags exist for traceability and manual
+rollback (`docker pull ghcr.io/sagebati/katago-ws:cpu-v1.2.0`), not (yet) for any
+automated deploy.
+
 ```bash
 # Run a worker from any of the three images, pointed at a deployed orchestrator —
 # pick the tag for the host's accelerator; the run flags differ per backend.

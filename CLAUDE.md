@@ -163,6 +163,43 @@ port 50051 — that wording is stale. The truth:
 When writing new code or docs, describe this as WebSocket; don't propagate the
 gRPC wording.
 
+## CI/CD & releases
+
+Four workflow files, each with a distinct job:
+
+- [`ci.yml`](.github/workflows/ci.yml) — PR/main-push gate: `cargo fmt --check`,
+  `cargo clippy --all-targets -- -D warnings`, `cargo nextest run`.
+- [`pr-title-lint.yml`](.github/workflows/pr-title-lint.yml) — advisory Conventional
+  Commits check on PR titles (release-plz parses these under squash-merge).
+- [`image.yml`](.github/workflows/image.yml) — the **production-load-bearing** path:
+  builds + pushes rolling `:cpu`/`:cuda`/`:opencl`/`:latest`/`:<variant>-<sha>` images
+  on every push to `main`. Coolify's deploy tracks `:latest`. Don't touch this file
+  casually — a break here is a break in production.
+- [`release.yml`](.github/workflows/release.yml) — tag-triggered (`v*.*.*`, pushed by
+  release-plz): compiles the binary **once** on the runner (not per-variant, unlike
+  `image.yml`), builds `:<variant>-vX.Y.Z` images from that prebuilt binary via the
+  Dockerfile's `runtime-prebuilt` target, and attaches a binary tarball + checksum to
+  the GitHub Release. Kept in its own file so it can break without risking `image.yml`.
+
+Plus [`release-plz.yml`](.github/workflows/release-plz.yml) (version bump / changelog
+PR / tag+release, config in [`release-plz.toml`](release-plz.toml)) — runs on
+`RELEASE_PLZ_PAT`, not `GITHUB_TOKEN`, because GitHub suppresses downstream workflow
+triggers for `GITHUB_TOKEN`-authored pushes and the `v*.*.*` tag it pushes must fire
+`release.yml`.
+
+**The `muxa`/`pgmq` sibling pins are one source of truth**:
+[`.github/sibling-refs.env`](.github/sibling-refs.env), read by
+[`.github/actions/checkout-siblings/`](.github/actions/checkout-siblings/action.yml)
+(used by `ci.yml`, `image.yml`, and `release.yml`'s `build-binary` job — `muxa` used to
+float on `ref: main`, which is why this exists). Bumping `muxa`/`pgmq` is a one-line
+change there, not a per-workflow edit.
+
+**The KataGo version + per-variant base/zip/pkgs trio live only in the
+[`justfile`](justfile)** (`katago_version` + `*_base`/`*_zip`/`*_pkgs`/`opencl_rusticl`
+vars). `just print-matrix` emits them as JSON; `image.yml` and `release.yml` both
+consume it via a small `matrix` job + `fromJson()` rather than hardcoding a second copy
+in YAML. Change the KataGo version in exactly one place: the justfile.
+
 ## Conventions
 
 - **Config**: muxa loads `muxa.toml` via figment, merged with `MUXA_*` env vars

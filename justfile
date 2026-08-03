@@ -7,13 +7,19 @@
 image := "katago-ws"
 ctx   := ".."
 
+# KataGo engine version — single source of truth (interpolated into the three
+# zip names below and passed explicitly as a build-arg, rather than relying on
+# the Dockerfile's own default). CI derives its build matrix from this file via
+# `just print-matrix`, so this is the only place the version needs to change.
+katago_version := "v1.16.5"
+
 # Per-platform settings — single source of truth for recipes AND `just makefile`.
 cpu_base    := "debian:bookworm-slim"
-cpu_zip     := "katago-v1.16.5-eigen-linux-x64.zip"
+cpu_zip     := "katago-" + katago_version + "-eigen-linux-x64.zip"
 cpu_pkgs    := "ca-certificates"
 
 cuda_base   := "nvidia/cuda:12.8.0-cudnn-runtime-ubuntu24.04"
-cuda_zip    := "katago-v1.16.5-cuda12.8-cudnn9.8.0-linux-x64.zip"
+cuda_zip    := "katago-" + katago_version + "-cuda12.8-cudnn9.8.0-linux-x64.zip"
 cuda_pkgs   := "ca-certificates"
 
 # KataGo has no ROCm backend; AMD (and other) GPUs run via its OpenCL build.
@@ -23,7 +29,7 @@ cuda_pkgs   := "ca-certificates"
 # "cannot open file '/usr/lib/clc/gfx1030-amdgcn-mesa-mesa3d.bc'". trixie's
 # Mesa 25.0 / libclc 19 covers gfx10xx/gfx11xx and has a working rusticl.
 opencl_base    := "debian:trixie-slim"
-opencl_zip     := "katago-v1.16.5-opencl-linux-x64.zip"
+opencl_zip     := "katago-" + katago_version + "-opencl-linux-x64.zip"
 opencl_pkgs    := "ca-certificates ocl-icd-libopencl1 mesa-opencl-icd clinfo"
 # Which gallium drivers rusticl exposes. AMD + Intel; NVIDIA users want :cuda.
 opencl_rusticl := "radeonsi,iris"
@@ -42,6 +48,7 @@ test *ARGS:
 cpu:
     DOCKER_BUILDKIT=1 docker build -f Dockerfile -t {{image}}:cpu \
       --build-arg RUNTIME_BASE={{cpu_base}} \
+      --build-arg KATAGO_VERSION={{katago_version}} \
       --build-arg KATAGO_ZIP={{cpu_zip}} \
       --build-arg RUNTIME_PKGS="{{cpu_pkgs}}" \
       {{ctx}}
@@ -51,6 +58,7 @@ cpu:
 cuda:
     DOCKER_BUILDKIT=1 docker build -f Dockerfile -t {{image}}:cuda \
       --build-arg RUNTIME_BASE={{cuda_base}} \
+      --build-arg KATAGO_VERSION={{katago_version}} \
       --build-arg KATAGO_ZIP={{cuda_zip}} \
       --build-arg RUNTIME_PKGS="{{cuda_pkgs}}" \
       {{ctx}}
@@ -60,6 +68,7 @@ cuda:
 opencl:
     DOCKER_BUILDKIT=1 docker build -f Dockerfile -t {{image}}:opencl \
       --build-arg RUNTIME_BASE={{opencl_base}} \
+      --build-arg KATAGO_VERSION={{katago_version}} \
       --build-arg KATAGO_ZIP={{opencl_zip}} \
       --build-arg RUNTIME_PKGS="{{opencl_pkgs}}" \
       --build-arg RUSTICL_DRIVERS="{{opencl_rusticl}}" \
@@ -67,6 +76,17 @@ opencl:
 
 # Build all three.
 all: cpu cuda opencl
+
+# Emit the CI build matrix as JSON: {"include":[{variant,base,zip,pkgs,rusticl,katago_version}...]}.
+# Consumed by .github/workflows/{image,release}.yml via fromJson() so the
+# variant trios never need a second, independently-maintained copy in YAML.
+# `rusticl` is "none" for cpu/cuda (matches the Dockerfile's own ARG default).
+print-matrix:
+    @printf '{"katago_version":"%s","include":[%s,%s,%s]}\n' \
+      '{{katago_version}}' \
+      '{"variant":"cpu","base":"{{cpu_base}}","zip":"{{cpu_zip}}","pkgs":"{{cpu_pkgs}}","rusticl":"none"}' \
+      '{"variant":"cuda","base":"{{cuda_base}}","zip":"{{cuda_zip}}","pkgs":"{{cuda_pkgs}}","rusticl":"none"}' \
+      '{"variant":"opencl","base":"{{opencl_base}}","zip":"{{opencl_zip}}","pkgs":"{{opencl_pkgs}}","rusticl":"{{opencl_rusticl}}"}'
 
 # Compile this justfile into a standalone Makefile (runs without `just`).
 makefile:

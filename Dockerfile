@@ -17,13 +17,18 @@ ARG RUNTIME_BASE=debian:bookworm-slim
 ARG KATAGO_VERSION=v1.16.5
 ARG KATAGO_ZIP=katago-v1.16.5-eigen-linux-x64.zip
 ARG MODEL_URL=https://github.com/lightvector/KataGo/releases/download/v1.4.5/g170e-b20c256x2-s5303129600-d1228401921.bin.gz
-ARG CONFIG_URL=https://raw.githubusercontent.com/lightvector/KataGo/v1.16.5/cpp/configs/analysis_example.cfg
+ARG CONFIG_URL=https://raw.githubusercontent.com/lightvector/KataGo/${KATAGO_VERSION}/cpp/configs/analysis_example.cfg
 ARG RUNTIME_PKGS=ca-certificates
 
 ###############################################################################
 # Stage 1 — build the Rust binary (glibc / Debian)
+#
+# Used by the local/`just` path and by the main-push image build, both of
+# which compile in-container. The tag-triggered release build compiles once
+# on the runner instead and skips straight to `runtime-prebuilt` below, so
+# the (slow, LTO) compile isn't repeated per variant.
 ###############################################################################
-FROM rust:1-bookworm AS builder
+FROM rust:1.90.0-bookworm AS build-binary
 
 # pkg-config + libpq-dev let pq-sys (pulled transitively by diesel) link; the
 # binary doesn't actually call libpq (diesel-async is pure Rust), so it's
@@ -69,9 +74,15 @@ RUN curl -fsSL -o katago.zip \
     && rm -f katago.zip
 
 ###############################################################################
-# Stage 3 — runtime (base varies per platform)
+# Stage 3 — runtime base (everything but the katago-ws binary; base varies per
+# platform). Split from the binary so it can be finished two ways below: by
+# copying the just-compiled binary out of `build-binary` (stage `runtime`,
+# used by local/`just` builds and the main-push image build), or by copying in
+# a binary compiled once on the runner outside Docker (stage
+# `runtime-prebuilt`, used by the tag-triggered release build so the slow
+# LTO=fat compile isn't repeated per variant).
 ###############################################################################
-FROM ${RUNTIME_BASE} AS runtime
+FROM ${RUNTIME_BASE} AS runtime-base
 ARG RUNTIME_PKGS
 ARG RUSTICL_DRIVERS=none
 
@@ -86,14 +97,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends ${RUNTIME_PKGS}
     # have no Mesa.
     && rm -f /etc/OpenCL/vendors/mesa.icd
 
-COPY --from=builder /usr/local/bin/katago-ws /usr/local/bin/katago-ws
 COPY --from=katago /kata/katago           /opt/katago/katago
 COPY --from=katago /kata/model.bin.gz     /opt/katago/model.bin.gz
 COPY --from=katago /kata/analysis.cfg     /opt/katago/analysis.cfg
 COPY katago-ws/muxa.toml             /app/muxa.toml
 
 WORKDIR /app
-USER app
 
 # KataGo ships as an AppImage; the slim runtime has no FUSE, so
 # APPIMAGE_EXTRACT_AND_RUN makes it extract-and-run instead of self-mounting
@@ -114,4 +123,24 @@ ENV RUSTICL_ENABLE=${RUSTICL_DRIVERS} \
 EXPOSE 3000
 
 # No in-image HEALTHCHECK tool; probe GET /health from your orchestrator/LB.
+# USER is deliberately NOT set here — it comes last in each leaf stage below,
+# after that stage's binary COPY, so every COPY in this Dockerfile still runs
+# as root (matching the pre-split behavior) and only the final image runs
+# unprivileged.
+
+# Release target: binary supplied via a named Buildx build context (`prebuilt`)
+# instead of compiled here — see .github/workflows/release.yml. Deliberately
+# defined BEFORE `runtime` below so `runtime` stays the last stage in the file
+# and is still what gets built by anything that invokes `docker build` without
+# an explicit --target (e.g. Cloudflare's wrangler.jsonc container build).
+FROM runtime-base AS runtime-prebuilt
+COPY --from=prebuilt /katago-ws /usr/local/bin/katago-ws
+USER app
+ENTRYPOINT ["katago-ws"]
+
+# Default target: binary compiled in this same Docker build (local/`just`,
+# main-push image.yml). Must stay the LAST stage — see note above.
+FROM runtime-base AS runtime
+COPY --from=build-binary /usr/local/bin/katago-ws /usr/local/bin/katago-ws
+USER app
 ENTRYPOINT ["katago-ws"]

@@ -1,0 +1,16 @@
+[workspace]
+release = true
+publish = false
+git_release_enable = true
+git_tag_enable = true
+changelog_update = true
+pr_labels = ["release"]
+
+[[package]]
+name = "katago-ws"
+publish = false
+# Bin crate, no public library API — nothing for cargo-semver-checks to check.
+semver_check = false
+changelog_path = "CHANGELOG.md"
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"

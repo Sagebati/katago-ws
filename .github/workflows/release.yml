@@ -1,0 +1,174 @@
+# Tag-triggered release: compile the katago-ws binary ONCE (unlike image.yml,
+# which compiles it separately inside each of the 3 variant Docker builds),
+# then reuse it for 3 versioned images plus a downloadable binary release
+# asset. Kept entirely separate from image.yml (the production-load-bearing
+# main-push path Coolify's rolling deploy depends on) so this can break
+# without any risk to that path.
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag/ref to release (for manual testing)"
+        required: false
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      katago_version: ${{ steps.matrix.outputs.katago_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: katago-ws
+          ref: ${{ inputs.ref }}
+
+      - uses: extractions/setup-just@v3
+
+      - id: matrix
+        working-directory: katago-ws
+        run: |
+          json="$(just print-matrix)"
+          echo "matrix=$(echo "$json" | jq -c '{include}')" >> "$GITHUB_OUTPUT"
+          echo "katago_version=$(echo "$json" | jq -r '.katago_version')" >> "$GITHUB_OUTPUT"
+
+  build-binary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout katago-ws
+        uses: actions/checkout@v4
+        with:
+          path: katago-ws
+          ref: ${{ inputs.ref }}
+
+      - name: Checkout siblings (muxa, pgmq)
+        uses: ./katago-ws/.github/actions/checkout-siblings
+
+      - name: Toolchain sanity (installs the rust-toolchain.toml pin)
+        working-directory: katago-ws
+        run: rustc --version && cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "katago-ws -> target"
+
+      - name: Install libpq (diesel/pq-sys link dep)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libpq-dev
+
+      - name: cargo build --release
+        working-directory: katago-ws
+        run: |
+          rustup target add x86_64-unknown-linux-gnu
+          cargo build --release --locked --target x86_64-unknown-linux-gnu
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: katago-ws-x86_64-unknown-linux-gnu
+          path: katago-ws/target/x86_64-unknown-linux-gnu/release/katago-ws
+          if-no-files-found: error
+
+  build-push-images:
+    needs: [matrix, build-binary]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix.outputs.matrix) }}
+    steps:
+      - name: Free runner disk (image bundles KataGo + a model + a release build)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          df -h /
+
+      - name: Checkout katago-ws
+        uses: actions/checkout@v4
+        with:
+          path: katago-ws
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: katago-ws-x86_64-unknown-linux-gnu
+          path: prebuilt
+
+      - run: chmod +x prebuilt/katago-ws
+
+      - name: Scope the Docker build context
+        run: |
+          cat > "$GITHUB_WORKSPACE/.dockerignore" <<'EOF'
+          **/.git
+          **/target
+          **/node_modules
+          **/.wrangler
+          **/.idea
+          EOF
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # context is the workspace root (not katago-ws/) — same convention as
+      # image.yml — because the Dockerfile's runtime-base stage does
+      # `COPY katago-ws/muxa.toml ...` relative to that root. The build-binary
+      # stage (which needs the sibling muxa/pgmq checkouts) is never evaluated
+      # for the runtime-prebuilt target, so those siblings aren't needed here.
+      - name: Build + push ${{ matrix.variant }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: katago-ws/Dockerfile
+          target: runtime-prebuilt
+          push: true
+          build-contexts: |
+            prebuilt=prebuilt
+          build-args: |
+            RUNTIME_BASE=${{ matrix.base }}
+            KATAGO_VERSION=${{ needs.matrix.outputs.katago_version }}
+            KATAGO_ZIP=${{ matrix.zip }}
+            RUNTIME_PKGS=${{ matrix.pkgs }}
+            RUSTICL_DRIVERS=${{ matrix.rusticl }}
+          tags: ghcr.io/sagebati/katago-ws:${{ matrix.variant }}-${{ github.ref_name }}
+          cache-from: type=gha,scope=release-${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.variant }}
+
+  attach-release-assets:
+    needs: build-binary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: katago-ws-x86_64-unknown-linux-gnu
+          path: dist
+
+      - name: Package binary + checksum
+        working-directory: dist
+        run: |
+          chmod +x katago-ws
+          tar czf katago-ws-x86_64-unknown-linux-gnu.tar.gz katago-ws
+          sha256sum katago-ws-x86_64-unknown-linux-gnu.tar.gz > katago-ws-x86_64-unknown-linux-gnu.tar.gz.sha256
+
+      # Upserts by tag name onto the Release release-plz already created (with
+      # generated notes) — doesn't create a duplicate. Default GITHUB_TOKEN is
+      # fine here: this only appends assets, it doesn't need to trigger
+      # anything downstream (unlike release-plz.yml's tag push).
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            dist/katago-ws-x86_64-unknown-linux-gnu.tar.gz
+            dist/katago-ws-x86_64-unknown-linux-gnu.tar.gz.sha256
