@@ -28,7 +28,7 @@ ARG RUNTIME_PKGS=ca-certificates
 # on the runner instead and skips straight to `runtime-prebuilt` below, so
 # the (slow, LTO) compile isn't repeated per variant.
 ###############################################################################
-FROM rust:1.90.0-bookworm AS build-binary
+FROM rust:1.95.0-bookworm AS build-binary
 
 # pkg-config + libpq-dev let pq-sys (pulled transitively by diesel) link; the
 # binary doesn't actually call libpq (diesel-async is pure Rust), so it's
