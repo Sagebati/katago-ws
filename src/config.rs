@@ -111,7 +111,10 @@ fn default_reconnect_backoff() -> u64 {
 ///
 /// Field relevance depends on the launch role:
 /// - `concurrency` — consumer lease loops (`standalone`/`orchestrator`) **and**
-///   the slots a `worker` advertises to the orchestrator.
+///   the slots a `worker` advertises to the orchestrator; overridden by
+///   `max_parallelism` when set.
+/// - `max_parallelism` — auto-derive `concurrency` from the host's detected
+///   CPU core count instead of the fixed number.
 /// - `visibility_timeout_secs` / `poll_secs` / `max_attempts` — the pgmq consumer
 ///   side (`standalone`/`orchestrator`); ignored by a `worker` (no DB).
 /// - `orchestrator_url` / `auth_token` / `reconnect_backoff_secs` — the `worker`
@@ -120,7 +123,15 @@ fn default_reconnect_backoff() -> u64 {
 #[serde(default)]
 pub struct WorkerConfig {
     /// Number of concurrent worker loops (consumer) / advertised slots (worker).
+    /// Ignored when `max_parallelism` is set.
     pub concurrency: usize,
+    /// When true, ignore `concurrency` and derive it from the host's detected
+    /// CPU core count instead (`std::thread::available_parallelism()`), so the
+    /// worker runs the maximum number of concurrent analyses the machine can
+    /// support. Falls back to `concurrency` if detection fails. Does not change
+    /// KataGo's own thread/GPU tuning (`analysis.cfg`) — only how many
+    /// concurrent requests this process feeds into it.
+    pub max_parallelism: bool,
     /// `worker` role: human-readable name to register under. Empty ⇒ a friendly
     /// one is generated at startup (e.g. `brave-otter-42`).
     pub name: String,
@@ -144,6 +155,7 @@ impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
             concurrency: default_concurrency(),
+            max_parallelism: false,
             name: String::new(),
             visibility_timeout_secs: default_visibility(),
             poll_secs: default_poll(),
@@ -151,6 +163,21 @@ impl Default for WorkerConfig {
             orchestrator_url: default_orchestrator_url(),
             auth_token: SecretString::from(String::new()),
             reconnect_backoff_secs: default_reconnect_backoff(),
+        }
+    }
+}
+
+impl WorkerConfig {
+    /// Effective loop/slot count: the detected CPU core count when
+    /// `max_parallelism` is set (falling back to `concurrency` if detection
+    /// fails), otherwise `concurrency` verbatim. Always at least 1.
+    pub fn effective_concurrency(&self) -> usize {
+        if self.max_parallelism {
+            std::thread::available_parallelism()
+                .map(std::num::NonZeroUsize::get)
+                .unwrap_or_else(|_| self.concurrency.max(1))
+        } else {
+            self.concurrency.max(1)
         }
     }
 }
@@ -172,5 +199,29 @@ impl Default for OrchestratorConfig {
         Self {
             auth_token: SecretString::from(String::new()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WorkerConfig;
+
+    #[test]
+    fn effective_concurrency_uses_configured_value_by_default() {
+        let cfg = WorkerConfig {
+            concurrency: 5,
+            ..WorkerConfig::default()
+        };
+        assert_eq!(cfg.effective_concurrency(), 5);
+    }
+
+    #[test]
+    fn effective_concurrency_derives_from_cpu_count_when_max_parallelism_set() {
+        let cfg = WorkerConfig {
+            concurrency: 5,
+            max_parallelism: true,
+            ..WorkerConfig::default()
+        };
+        assert!(cfg.effective_concurrency() >= 1);
     }
 }

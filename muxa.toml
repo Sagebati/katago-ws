@@ -79,6 +79,9 @@ trust_forwarded_for = false
 [worker]
 # Consumer lease loops (standalone/orchestrator) AND the slots a worker advertises.
 concurrency = 2
+# Set true (or MUXA_WORKER__MAX_PARALLELISM=true) to ignore `concurrency` and
+# auto-size it to the host's detected CPU core count instead.
+# max_parallelism = false
 # Visibility timeout while a job is in flight (the worker heartbeats to extend
 # it). Below the config.rs default of 600 — the heartbeat re-arms it as needed.
 visibility_timeout_secs = 120

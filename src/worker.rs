@@ -80,7 +80,7 @@ pub fn register(
     engine: Arc<AnalysisEngine>,
     cfg: WorkerConfig,
 ) {
-    let n = cfg.concurrency.max(1);
+    let n = cfg.effective_concurrency();
     for _ in 0..n {
         let db = db.clone();
         let executor = LocalExecutor::new(Arc::clone(&engine));

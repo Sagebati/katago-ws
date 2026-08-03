@@ -147,6 +147,7 @@ production, not the committed file.
 | `MUXA_ENGINE__MAX_VISITS` | KataGo visits per move. **Keep modest (8–50)** so a game finishes inside the lease. |
 | `MUXA_ENGINE__BINARY` / `__CONFIG` / `__MODEL` | KataGo paths (the image sets these). |
 | `MUXA_WORKER__CONCURRENCY` | Worker lease loops / advertised slots. |
+| `MUXA_WORKER__MAX_PARALLELISM` | Set `true` to ignore `__CONCURRENCY` and auto-size it to the host's detected CPU core count instead. |
 | `MUXA_WORKER__ORCHESTRATOR_URL` | `worker` role: the `ws(s)://…/cluster` URL to dial. |
 | `MUXA_WORKER__AUTH_TOKEN` / `MUXA_ORCHESTRATOR__AUTH_TOKEN` | Shared Bearer secret for `/cluster`. |
 | `MUXA_SENTRY__DSN` | Enable Sentry (see below). |
