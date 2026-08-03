@@ -20,8 +20,12 @@ fn default_max_visits() -> u32 {
 fn default_pv_len() -> u32 {
     8
 }
+/// The candidates are already searched by the time they're reported, so a
+/// larger list costs payload size only, not engine time. Ten rather than five
+/// because a consumer checking a proposed move against the engine's opinion can
+/// only judge moves that appear here — everything else it has to call unknown.
 fn default_top_k() -> usize {
-    5
+    10
 }
 fn default_komi() -> f32 {
     7.5
@@ -67,7 +71,11 @@ impl Default for EngineConfig {
             model: default_model(),
             max_visits: default_max_visits(),
             analysis_pv_len: default_pv_len(),
-            include_ownership: false,
+            // On by default: ownership is what lets a consumer say *which*
+            // stones a mistake cost, rather than only how many points. It
+            // roughly doubles KataGo's memory use and costs a little speed —
+            // turn it off on a memory-constrained worker.
+            include_ownership: true,
             top_k: default_top_k(),
             default_komi: default_komi(),
             default_board_size: default_board_size(),

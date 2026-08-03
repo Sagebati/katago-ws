@@ -20,6 +20,21 @@ pub enum Color {
     White,
 }
 
+impl Color {
+    /// The other player.
+    ///
+    /// Every per-move figure is a difference between two evaluations taken one
+    /// turn apart, and those turns belong to opposite players — so flipping
+    /// colour is the most common operation in the annotator.
+    #[must_use]
+    pub fn other(self) -> Self {
+        match self {
+            Self::Black => Self::White,
+            Self::White => Self::Black,
+        }
+    }
+}
+
 /// Scoring ruleset for KataGo. Serializes to KataGo's shorthand
 /// (`"japanese"` / `"chinese"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -31,7 +31,7 @@ impl AnalysisEngine {
     pub async fn analyze(&self, sgf: &str) -> AppResult<GameAnalysis> {
         let game = sgf::parse(sgf, self.cfg.default_board_size, self.cfg.default_komi)?;
         let turns = self.katago.analyze(&game, &self.cfg).await?;
-        Ok(annotate::assemble(&game, turns, self.cfg.top_k))
+        Ok(annotate::assemble(&game, turns, &self.cfg))
     }
 }
 
