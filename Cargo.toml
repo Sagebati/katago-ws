@@ -2,6 +2,10 @@
 name = "katago-ws"
 version = "0.1.0"
 edition = "2024"
+# Never publishable: path deps on unpublished sibling crates (muxa, pgmq).
+# release-plz.toml also sets this per-package; this is belt-and-suspenders so
+# a stray local `cargo publish` fails fast with a clear reason.
+publish = false
 
 [dependencies]
 # muxa framework (local): web + diesel(async pg) + pgmq + otel + sentry + openapi

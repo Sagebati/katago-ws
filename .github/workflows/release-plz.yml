@@ -1,0 +1,51 @@
+# Version bump + changelog + tag + GitHub Release, via release-plz.
+#
+# `release-plz-pr` opens/updates a "chore: release vX.Y.Z" PR bumping
+# Cargo.toml + CHANGELOG.md from Conventional Commits since the last tag.
+# `release-plz-release` fires once that PR is merged: it creates the git tag
+# and GitHub Release. Both run on every push to main; release-plz decides
+# internally which (if either) has anything to do.
+#
+# Requires the RELEASE_PLZ_PAT repo secret (a fine-grained PAT scoped to this
+# repo, Contents: read/write + Pull requests: read/write + Metadata: read) —
+# NOT the default GITHUB_TOKEN. GitHub suppresses downstream workflow triggers
+# for GITHUB_TOKEN-authored pushes, and the tag this workflow pushes must
+# trigger .github/workflows/release.yml.
+name: release-plz
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-plz-release:
+    name: release-plz release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_PAT }}
+      - uses: MarcoIeni/release-plz-action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_PAT }}
+
+  release-plz-pr:
+    name: release-plz release-pr
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_PAT }}
+      - uses: MarcoIeni/release-plz-action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_PAT }}

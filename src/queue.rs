@@ -74,7 +74,12 @@ pub async fn archive(pool: &DieselPool, queue: Queue, msg_id: i64) -> AppResult<
 /// Re-arms the lock: the message stays invisible to other consumers for another
 /// `vt_secs`. Used as a heartbeat so a job that runs longer than the original
 /// timeout isn't redelivered (and double-processed) while still being worked on.
-pub async fn extend_vt(pool: &DieselPool, queue: Queue, msg_id: i64, vt_secs: i32) -> AppResult<()> {
+pub async fn extend_vt(
+    pool: &DieselPool,
+    queue: Queue,
+    msg_id: i64,
+    vt_secs: i32,
+) -> AppResult<()> {
     let mut conn = pool.0.get().await.map_err(q_err)?;
     (&mut *conn)
         .set_vt::<JobMessage>(queue.as_str(), msg_id, vt_secs)

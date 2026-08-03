@@ -23,6 +23,10 @@ services:
       # Parent dir so the local muxa/pgmq path-deps are in the build context.
       context: ..
       dockerfile: katago-ws/Dockerfile
+      # `runtime` is the Dockerfile's last (default) stage, so this is
+      # belt-and-suspenders — named explicitly so a future stage reorder can't
+      # silently change what this builds.
+      target: runtime
     environment:
       MUXA_DIESEL__URL: postgres://postgres:postgres@db:5432/goban
       RUST_LOG: info
@@ -58,6 +62,7 @@ services:
   #   build:
   #     context: ..
   #     dockerfile: katago-ws/Dockerfile
+  #     target: runtime
   #   command: orchestrator            # role (appended to the ENTRYPOINT)
   #   environment:
   #     MUXA_DIESEL__URL: postgres://postgres:postgres@db:5432/goban
@@ -77,6 +82,7 @@ services:
   #   build:
   #     context: ..
   #     dockerfile: katago-ws/Dockerfile
+  #     target: runtime
   #   command: worker
   #   environment:
   #     # No MUXA_DIESEL__URL — workers never reach Postgres; they only dial the

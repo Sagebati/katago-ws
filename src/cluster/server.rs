@@ -58,7 +58,11 @@ pub struct ClusterDispatcher {
 impl ClusterDispatcher {
     /// Build the dispatcher state for the `orchestrator` role.
     pub fn new(cfg: WorkerConfig, token: SecretString, shutdown: ShutdownToken) -> Self {
-        Self { cfg, token, shutdown }
+        Self {
+            cfg,
+            token,
+            shutdown,
+        }
     }
 
     /// Whether the request carries the expected `Authorization: Bearer <token>`
@@ -94,7 +98,11 @@ fn tokens_match(presented: &str, expected: &str) -> bool {
 ///
 /// Only mounted in the `orchestrator` role (where `ApiState.cluster` is set).
 /// Rejects the upgrade with 401 if the Bearer token is missing/wrong.
-pub async fn cluster_ws(State(api): State<ApiState>, headers: HeaderMap, upgrade: WebSocketUpgrade) -> Response {
+pub async fn cluster_ws(
+    State(api): State<ApiState>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Response {
     let (Some(dispatcher), Some(registry)) = (api.cluster.as_ref(), api.workers.as_ref()) else {
         return (StatusCode::NOT_FOUND, "cluster socket not enabled").into_response();
     };
@@ -137,7 +145,10 @@ async fn run_session(
     let conn_token = shutdown.child_token();
 
     // Drive `slots` lease loops, each dispatching over the shared socket.
-    let executor = RemoteExecutor { out_tx, pending: Arc::clone(&pending) };
+    let executor = RemoteExecutor {
+        out_tx,
+        pending: Arc::clone(&pending),
+    };
     for _ in 0..slots {
         let db = db.clone();
         let cfg = cfg.clone();
@@ -237,7 +248,9 @@ impl Executor for RemoteExecutor {
         let request = JobRequest { job_id, sgf };
         if self.out_tx.send(request).await.is_err() {
             self.pending.lock().await.remove(&job_id);
-            return Err(AppError::Queue("worker socket closed before dispatch".to_owned()));
+            return Err(AppError::Queue(
+                "worker socket closed before dispatch".to_owned(),
+            ));
         }
 
         match rx.await {
@@ -245,7 +258,9 @@ impl Executor for RemoteExecutor {
             // Worker ran the analysis but it failed (bad SGF, engine error, …).
             Ok(Err(message)) => Err(AppError::Inference(message)),
             // Sender dropped: the worker disconnected before answering.
-            Err(_) => Err(AppError::Queue("worker disconnected before result".to_owned())),
+            Err(_) => Err(AppError::Queue(
+                "worker disconnected before result".to_owned(),
+            )),
         }
     }
 }
@@ -264,7 +279,10 @@ mod tests {
 
     fn bearer(token: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
         headers
     }
 
@@ -292,15 +310,25 @@ mod tests {
 
     #[test]
     fn messages_round_trip_as_json() {
-        let hello = serde_json::to_string(&ClientMsg::Hello { slots: 4, name: "rig".to_owned() }).unwrap();
+        let hello = serde_json::to_string(&ClientMsg::Hello {
+            slots: 4,
+            name: "rig".to_owned(),
+        })
+        .unwrap();
         assert!(matches!(
             serde_json::from_str::<ClientMsg>(&hello).unwrap(),
             ClientMsg::Hello { slots: 4, .. }
         ));
 
-        let job = JobRequest { job_id: Uuid::nil(), sgf: "(;GM[1])".to_owned() };
+        let job = JobRequest {
+            job_id: Uuid::nil(),
+            sgf: "(;GM[1])".to_owned(),
+        };
         let wire = serde_json::to_string(&job).unwrap();
-        assert_eq!(serde_json::from_str::<JobRequest>(&wire).unwrap().sgf, "(;GM[1])");
+        assert_eq!(
+            serde_json::from_str::<JobRequest>(&wire).unwrap().sgf,
+            "(;GM[1])"
+        );
 
         let result = serde_json::to_string(&ClientMsg::Result {
             job_id: Uuid::nil(),

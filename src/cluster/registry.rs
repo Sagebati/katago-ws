@@ -83,18 +83,34 @@ impl WorkerRegistry {
     ///
     /// Best-effort: if the registry task has already stopped (shutdown), the guard
     /// carries id `0` and its drop is a no-op.
-    pub async fn register(&self, name: String, peer: Option<SocketAddr>, slots: u32) -> WorkerGuard {
+    pub async fn register(
+        &self,
+        name: String,
+        peer: Option<SocketAddr>,
+        slots: u32,
+    ) -> WorkerGuard {
         let (reply, rx) = oneshot::channel();
         if self
             .tx
-            .send(Cmd::Register { name, peer, slots, reply })
+            .send(Cmd::Register {
+                name,
+                peer,
+                slots,
+                reply,
+            })
             .await
             .is_err()
         {
-            return WorkerGuard { tx: self.tx.clone(), id: 0 };
+            return WorkerGuard {
+                tx: self.tx.clone(),
+                id: 0,
+            };
         }
         let id = rx.await.unwrap_or(0);
-        WorkerGuard { tx: self.tx.clone(), id }
+        WorkerGuard {
+            tx: self.tx.clone(),
+            id,
+        }
     }
 
     /// Snapshot the currently-connected workers, oldest connection first. Returns
@@ -179,7 +195,10 @@ mod tests {
         let g1 = registry.register("alpha".to_owned(), None, 4).await;
         let g2 = registry.register("beta".to_owned(), None, 8).await;
         let snap = registry.snapshot().await;
-        assert_eq!(snap.iter().map(|w| (w.id, w.slots)).collect::<Vec<_>>(), vec![(1, 4), (2, 8)]);
+        assert_eq!(
+            snap.iter().map(|w| (w.id, w.slots)).collect::<Vec<_>>(),
+            vec![(1, 4), (2, 8)]
+        );
 
         // Dropping a guard deregisters that worker. The `Deregister` is enqueued
         // (try_send) before the following `Snapshot`, and the owner processes the

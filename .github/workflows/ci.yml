@@ -1,0 +1,58 @@
+# PR/main-push quality gate: fmt, clippy, tests. Checks out the same pinned
+# muxa/pgmq siblings the image build uses — this crate cannot build standalone
+# (see Cargo.toml path deps, and CLAUDE.md).
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout katago-ws
+        uses: actions/checkout@v4
+        with:
+          path: katago-ws
+
+      - name: Checkout siblings (muxa, pgmq)
+        uses: ./katago-ws/.github/actions/checkout-siblings
+
+      - name: Toolchain sanity (installs the rust-toolchain.toml pin)
+        working-directory: katago-ws
+        run: rustc --version && cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "katago-ws -> target"
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Install libpq (diesel/pq-sys link dep)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libpq-dev
+
+      - name: cargo fmt --check
+        working-directory: katago-ws
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        working-directory: katago-ws
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo nextest run
+        working-directory: katago-ws
+        run: cargo nextest run

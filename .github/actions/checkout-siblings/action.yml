@@ -1,0 +1,27 @@
+name: checkout-siblings
+description: >
+  Checks out the sibling muxa/pgmq repos this crate path-depends on, at the
+  refs pinned in sibling-refs.env, into ./muxa and ./pgmq relative to the
+  workspace root. Run this *after* checking out katago-ws itself (that first
+  checkout can't be wrapped here, since this action lives inside it).
+
+runs:
+  using: composite
+  steps:
+    - name: Load pinned sibling refs
+      shell: bash
+      run: cat "${{ github.action_path }}/../../sibling-refs.env" >> "$GITHUB_ENV"
+
+    - name: Checkout muxa (sibling build-context crate, pinned)
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ env.MUXA_REPO }}
+        ref: ${{ env.MUXA_REF }}
+        path: muxa
+
+    - name: Checkout pgmq fork (sibling build-context crate, pinned)
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ env.PGMQ_REPO }}
+        ref: ${{ env.PGMQ_REF }}
+        path: pgmq

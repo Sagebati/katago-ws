@@ -21,7 +21,7 @@ use crate::error::{AppError, AppResult};
 use crate::http::ApiState;
 use crate::http::dto::{
     AnalysisSummary, JobId, ListResponse, StatusQuery, StatusResponse, SubmitResponse,
-    WorkersResponse, WorkerSummary,
+    WorkerSummary, WorkersResponse,
 };
 
 /// How often the live stream polls Postgres for job-state changes.
@@ -83,7 +83,11 @@ fn render_index(
              in-process (no remote workers).</p>",
         ),
         Some(list) => {
-            let _ = write!(html, "<h2>Workers <span class=\"count\">{}</span></h2>", list.len());
+            let _ = write!(
+                html,
+                "<h2>Workers <span class=\"count\">{}</span></h2>",
+                list.len()
+            );
             if list.is_empty() {
                 html.push_str("<p class=\"muted\">No workers connected.</p>");
             } else {
@@ -138,7 +142,10 @@ fn render_index(
             queued.len(),
         );
     } else {
-        let _ = write!(html, "<h2>Queue <span class=\"count\">{queued_total}</span></h2>");
+        let _ = write!(
+            html,
+            "<h2>Queue <span class=\"count\">{queued_total}</span></h2>"
+        );
     }
     if queued.is_empty() {
         html.push_str("<p class=\"muted\">Queue is empty.</p>");
@@ -382,7 +389,13 @@ mod tests {
 
     fn job(status: JobStatus) -> JobSummary {
         let now = Utc::now();
-        JobSummary { id: Uuid::nil(), status, error: None, created_at: now, updated_at: now }
+        JobSummary {
+            id: Uuid::nil(),
+            status,
+            error: None,
+            created_at: now,
+            updated_at: now,
+        }
     }
 
     #[test]
@@ -400,8 +413,13 @@ mod tests {
     #[test]
     fn dashboard_renders_workers_running_and_truncated_queue() {
         let peer: SocketAddr = "10.0.0.7:50713".parse().unwrap();
-        let workers =
-            vec![WorkerInfo { id: 3, name: "rig-7".to_owned(), peer: Some(peer), slots: 4, connected_at: Utc::now() }];
+        let workers = vec![WorkerInfo {
+            id: 3,
+            name: "rig-7".to_owned(),
+            peer: Some(peer),
+            slots: 4,
+            connected_at: Utc::now(),
+        }];
         let running = vec![job(JobStatus::Running)];
         let queued = vec![job(JobStatus::Queued), job(JobStatus::Queued)];
 
@@ -422,8 +440,13 @@ mod tests {
 
     #[test]
     fn dashboard_shows_worker_name() {
-        let workers =
-            vec![WorkerInfo { id: 7, name: "brave-otter-42".to_owned(), peer: None, slots: 1, connected_at: Utc::now() }];
+        let workers = vec![WorkerInfo {
+            id: 7,
+            name: "brave-otter-42".to_owned(),
+            peer: None,
+            slots: 1,
+            connected_at: Utc::now(),
+        }];
         let html = render_index(Some(&workers), &[], 0, &[]);
         assert!(html.contains("brave-otter-42"));
     }

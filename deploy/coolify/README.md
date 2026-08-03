@@ -20,6 +20,11 @@ Make sure Coolify can pull it — **one of**:
 - In **Coolify → Settings → Registries**, add `ghcr.io` with a GitHub PAT that has
   `read:packages`, then select it on the resource.
 
+Tagged releases (`vX.Y.Z`, via release-plz — see the root [README](../../README.md#releases))
+additionally publish versioned tags like `:cpu-vX.Y.Z`, alongside the `:latest` this
+Coolify setup tracks. Those are available for manual rollback (pin the Coolify
+resource to a specific `:cpu-vX.Y.Z` tag) but aren't wired into auto-deploy.
+
 ## 2. Supabase connection string
 In Supabase: **Project → Connect → Session pooler** (a `…pooler.supabase.com:5432`
 URL). Use that — it's IPv4-friendly (your VPS may be IPv4-only) and safe for a

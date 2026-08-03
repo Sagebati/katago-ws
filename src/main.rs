@@ -97,7 +97,9 @@ async fn run_standalone() -> muxa::Result<()> {
         // `diesel-sentry` feature → DieselPlugin installs query tracing itself.
         .with_plugin(DieselPlugin::new().with_migrations(MigrationsRunner::new(MIGRATIONS)))
         .await?
-        .with_plugin(PgmqPlugin::<DieselBackend, _>::new().queues([queue::Queue::Analysis.as_str()]))
+        .with_plugin(
+            PgmqPlugin::<DieselBackend, _>::new().queues([queue::Queue::Analysis.as_str()]),
+        )
         .await?
         .with_plugin(KataGoEnginePlugin)
         .await?;
@@ -114,7 +116,11 @@ async fn run_standalone() -> muxa::Result<()> {
 
     // No remote workers in this role (the engine runs in-process), so `/workers`
     // is empty and the `/cluster` socket isn't mounted.
-    let api = http::ApiState { db, workers: None, cluster: None };
+    let api = http::ApiState {
+        db,
+        workers: None,
+        cluster: None,
+    };
     serve_api(app, api, &rl_cfg).await
 }
 
@@ -128,7 +134,9 @@ async fn run_orchestrator() -> muxa::Result<()> {
         .await?
         .with_plugin(DieselPlugin::new().with_migrations(MigrationsRunner::new(MIGRATIONS)))
         .await?
-        .with_plugin(PgmqPlugin::<DieselBackend, _>::new().queues([queue::Queue::Analysis.as_str()]))
+        .with_plugin(
+            PgmqPlugin::<DieselBackend, _>::new().queues([queue::Queue::Analysis.as_str()]),
+        )
         .await?;
 
     let db = Selector::<DieselPool, _>::select(app.state()).clone();
@@ -146,7 +154,8 @@ async fn run_orchestrator() -> muxa::Result<()> {
 
     // The cluster socket rides the web router (`GET /cluster`); set the dispatcher
     // state so `api_router` mounts it and the handler can auth + dispatch jobs.
-    let dispatcher = cluster::server::ClusterDispatcher::new(worker_cfg, orch_cfg.auth_token, shutdown);
+    let dispatcher =
+        cluster::server::ClusterDispatcher::new(worker_cfg, orch_cfg.auth_token, shutdown);
     let api = http::ApiState {
         db,
         workers: Some(registry),
