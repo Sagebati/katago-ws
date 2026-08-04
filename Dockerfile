@@ -110,6 +110,10 @@ WORKDIR /app
 # worker) works out of the box — no per-deploy env needed.
 # rusticl only exposes a driver it has been asked for by name. `none` on the
 # CPU/CUDA images, where there is no rusticl to configure.
+# MUXA_ENGINE__AUTO_TUNE=false below: bare-metal workers auto-tune KataGo's
+# thread/batch settings on first launch (see src/engine/tune.rs) — off here
+# since a multi-minute benchmark on every container start isn't worth it; the
+# image ships a fixed binary/config/model anyway. Flip to `true` to opt back in.
 ENV RUSTICL_ENABLE=${RUSTICL_DRIVERS} \
     MUXA_CONFIG=/app/muxa.toml \
     MUXA_WEB__HOST=0.0.0.0 \
@@ -117,6 +121,7 @@ ENV RUSTICL_ENABLE=${RUSTICL_DRIVERS} \
     MUXA_ENGINE__BINARY=/opt/katago/katago \
     MUXA_ENGINE__CONFIG=/opt/katago/analysis.cfg \
     MUXA_ENGINE__MODEL=/opt/katago/model.bin.gz \
+    MUXA_ENGINE__AUTO_TUNE=false \
     APPIMAGE_EXTRACT_AND_RUN=1 \
     RUST_LOG=info
 

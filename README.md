@@ -128,6 +128,52 @@ orchestrator runs without auth, so no `MUXA_WORKER__AUTH_TOKEN` is needed — se
 (matching `[orchestrator].auth_token`) only if you enable it, and front it with TLS
 first, since plain `ws://` would send the token in cleartext.
 
+### Run a worker on bare metal (no Docker)
+
+Grab the `katago-ws-x86_64-unknown-linux-gnu.tar.gz` binary from a
+[Release](../../releases), install [KataGo](https://github.com/lightvector/KataGo/releases)
+yourself, and lay out its files under the XDG data directory:
+
+```bash
+# 1. katago on $PATH (adjust the release asset to your CPU/GPU):
+install -m755 katago ~/.local/bin/katago   # or anywhere already on $PATH
+
+# 2. Model + analysis config under $XDG_DATA_HOME (~/.local/share by default):
+mkdir -p ~/.local/share/katago-ws
+curl -fL -o ~/.local/share/katago-ws/model.bin.gz \
+  https://github.com/lightvector/KataGo/releases/download/v1.4.5/g170e-b20c256x2-s5303129600-d1228401921.bin.gz
+curl -fL -o ~/.local/share/katago-ws/analysis.cfg \
+  https://raw.githubusercontent.com/lightvector/KataGo/master/cpp/configs/analysis_example.cfg
+
+# 3. Point at an orchestrator and run:
+MUXA_WORKER__ORCHESTRATOR_URL=ws://your-orchestrator:3000/cluster katago-ws worker
+```
+
+No `MUXA_ENGINE__BINARY`/`__CONFIG`/`__MODEL` needed — those already default to
+exactly this layout (`binary` resolved against `$PATH`, `config`/`model` to
+`$XDG_DATA_HOME/katago-ws/`), and `muxa.toml` (if you want one) is found the
+same way: `$MUXA_CONFIG` > `./muxa.toml` > `$XDG_CONFIG_HOME/katago-ws/muxa.toml`.
+Any of the three files missing produces a specific error naming the exact path
+tried and a copy-pasteable fix — not a generic startup failure.
+
+On first launch the worker also **auto-tunes** KataGo's thread/batch settings
+for this host (`katago benchmark -tune`, on by default for a bare-metal run —
+see `MUXA_ENGINE__AUTO_TUNE` below) and caches the result at
+`$XDG_STATE_HOME/katago-ws/tuning.json` (`~/.local/state/katago-ws/` by
+default); later launches reuse it instantly unless the host/binary/model
+changed. This can take a while, especially first-run GPU driver warmup — that's
+expected, not stuck. To force a re-tune (e.g. after a hardware change), delete
+the cache: `rm ~/.local/state/katago-ws/tuning.json`.
+
+| Purpose | Default location |
+|---|---|
+| Config (`muxa.toml`) | `$MUXA_CONFIG` env var, else `./muxa.toml`, else `$XDG_CONFIG_HOME/katago-ws/muxa.toml` |
+| Data (KataGo model + analysis config) | a same-named file next to the binary if present, else `$XDG_DATA_HOME/katago-ws/` |
+| State (auto-tune cache) | `$XDG_STATE_HOME/katago-ws/tuning.json` |
+
+(`$XDG_*_HOME` fall back to `~/.config`, `~/.local/share`, `~/.local/state`
+respectively when unset, per the XDG Base Directory spec.)
+
 ```bash
 just test            # cargo nextest run  (cargo test works too)
 cargo clippy         # lints are enforced
@@ -142,11 +188,16 @@ production, not the committed file.
 | Key env var | Meaning |
 |---|---|
 | `MUXA_ENV` | Run mode: `development` / `production` (default: from build profile). Drives Sentry env + sample rates. |
+| `MUXA_CONFIG` | Explicit path to `muxa.toml`, overriding the `./muxa.toml` / XDG lookup (see "Run a worker on bare metal"). |
 | `MUXA_DIESEL__URL` | Postgres URL (use Supabase's **session** pooler, port 5432, in prod). |
 | `MUXA_WEB__HOST` / `MUXA_WEB__PORT` | Bind address (default `0.0.0.0:3000`). |
 | `MUXA_ENGINE__MAX_VISITS` | KataGo visits per move. **Keep modest (8–50)** so a game finishes inside the lease. |
-| `MUXA_ENGINE__BINARY` / `__CONFIG` / `__MODEL` | KataGo paths (the image sets these). |
+| `MUXA_ENGINE__BINARY` / `__CONFIG` / `__MODEL` | KataGo paths (the image sets these; a bare-metal run defaults to `$PATH` / `$XDG_DATA_HOME/katago-ws/`). |
+| `MUXA_ENGINE__AUTO_TUNE` | Auto-tune KataGo's thread/batch settings on first launch (default `true`; the shipped image sets it `false` — a multi-minute benchmark isn't worth it on a fixed, pre-baked config). |
+| `MUXA_ENGINE__STARTUP_TIMEOUT_SECS` | How long to wait for KataGo's ready signal before proceeding anyway (default `60`; not a failure on expiry — only an actual crash is). |
+| `MUXA_ENGINE__TUNE_TIMEOUT_SECS` | Timeout for the one-time auto-tune benchmark (default `1800`). |
 | `MUXA_WORKER__CONCURRENCY` | Worker lease loops / advertised slots. |
+| `MUXA_WORKER__MAX_PARALLELISM` | Set `true` to ignore `__CONCURRENCY` and auto-size it to the host's detected CPU core count instead. |
 | `MUXA_WORKER__ORCHESTRATOR_URL` | `worker` role: the `ws(s)://…/cluster` URL to dial. |
 | `MUXA_WORKER__AUTH_TOKEN` / `MUXA_ORCHESTRATOR__AUTH_TOKEN` | Shared Bearer secret for `/cluster`. |
 | `MUXA_SENTRY__DSN` | Enable Sentry (see below). |

@@ -144,6 +144,16 @@ own sub-router so the layer applies to it alone.
 `Arc<AnalysisEngine>`. `analyze` = parse SGF (`engine/sgf.rs`) → drive KataGo over
 JSON (`engine/katago.rs`) → annotate moves (`engine/annotate.rs`).
 
+Before spawning, `AnalysisEngine::spawn` runs `engine/preflight.rs` (validates
+binary/config/model, producing one actionable `AppError::EngineStartup` instead
+of a cryptic failure) and, if `[engine].auto_tune`, `engine/tune.rs` (runs
+`katago benchmark -tune` once and caches the derived thread/batch settings —
+applied via `-override-config`, never by rewriting `analysis.cfg`). `KataGo::spawn`
+then waits (bounded by `startup_timeout_secs`, not a failure on expiry — a fresh
+GPU host's first-run autotune can take minutes) for KataGo's own ready signal on
+stderr before claiming "ready", so a bad model/config/GPU-driver crash is caught
+at startup rather than on the first job.
+
 ### ⚠️ "gRPC" naming is stale — the transport is WebSocket
 
 The orchestrator↔worker control plane was migrated from gRPC/protobuf to a plain
@@ -207,6 +217,15 @@ in YAML. Change the KataGo version in exactly one place: the justfile.
   muxa's plugins own `[web]/[otel]/[sentry]/[diesel]`; this crate owns
   `[engine]/[worker]/[orchestrator]/[ratelimit]` (see [`src/config.rs`](src/config.rs)).
   Secrets come from the environment in production, not the committed `muxa.toml`.
+  The `muxa.toml` file itself is found via [`src/paths.rs`](src/paths.rs):
+  `$MUXA_CONFIG` > `./muxa.toml` > `$XDG_CONFIG_HOME/katago-ws/muxa.toml` > the
+  bare default — `main.rs`'s `build_app()` resolves this and passes it to
+  muxa's `App::with_config_file`, since `App::default()` only knows about the
+  first and second of those. `EngineConfig`'s `config`/`model` defaults follow
+  the same CWD-then-XDG-data-dir rule via `paths::data_file`. `main.rs`'s
+  `extract::<T>()` helper defaults a config section only when it's genuinely
+  absent — a present-but-malformed section (e.g. `concurrency = "two"`) is a
+  hard startup error, not a silent fallback.
 - **Lints are enforced** (`[lints.clippy]` in [`Cargo.toml`](Cargo.toml), a curated
   `restriction` subset). Notably: `unwrap_used`, `print_stdout`/`print_stderr`
   (use `tracing`, not stdout/stderr), `dbg_macro`, `todo`, `unimplemented`,

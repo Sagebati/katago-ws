@@ -119,7 +119,7 @@ struct Session {
 
 impl WorkerClient {
     fn new(engine: Arc<AnalysisEngine>, cfg: WorkerConfig, shutdown: ShutdownToken) -> Self {
-        let slots = u32::try_from(cfg.concurrency.max(1)).unwrap_or(u32::MAX);
+        let slots = u32::try_from(cfg.effective_concurrency()).unwrap_or(u32::MAX);
         let backoff = Duration::from_secs(cfg.reconnect_backoff_secs.max(1));
         let limiter = Arc::new(Semaphore::new(slots as usize));
         let name = if cfg.name.is_empty() {
