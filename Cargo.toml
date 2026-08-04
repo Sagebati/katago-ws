@@ -77,6 +77,12 @@ diesel_migrations = "2"
 # Fast multithreaded allocator.
 mimalloc = "0.1"
 
+# XDG base-directory discovery (config/data/state) for a bare-metal `worker` —
+# see `src/paths.rs`. `state_dir()` in particular encodes the `$XDG_STATE_HOME`
+# fallback rule correctly, which is fiddly to hand-roll (an empty or
+# non-absolute `$XDG_*` var must be ignored per spec).
+dirs = "6"
+
 # Time-ordered (v7) job ids are minted by Postgres (the `uuidv7()` DEFAULT), so
 # this crate is only needed for the `Uuid` type + serde — no client-side gen.
 uuid = { version = "1", features = ["serde", "v4"] }

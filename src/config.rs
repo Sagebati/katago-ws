@@ -6,13 +6,15 @@ use secrecy::SecretString;
 use serde::Deserialize;
 
 fn default_binary() -> String {
+    // Resolved against $PATH at spawn time (see `engine::preflight`) — no XDG
+    // involvement for the binary itself.
     "katago".to_owned()
 }
 fn default_config() -> String {
-    "analysis.cfg".to_owned()
+    crate::paths::data_file("analysis.cfg")
 }
 fn default_model() -> String {
-    "model.bin.gz".to_owned()
+    crate::paths::data_file("model.bin.gz")
 }
 fn default_max_visits() -> u32 {
     100
@@ -36,16 +38,24 @@ fn default_board_size() -> u8 {
 fn default_timeout() -> u64 {
     600
 }
+fn default_startup_timeout() -> u64 {
+    60
+}
+fn default_tune_timeout() -> u64 {
+    1800
+}
 
 /// `[engine]` — how to launch and drive the KataGo analysis engine.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct EngineConfig {
-    /// Path to (or name of) the `katago` binary.
+    /// Path to (or name of) the `katago` binary. Resolved against `$PATH` if
+    /// not absolute/relative-with-a-slash — see `engine::preflight`.
     pub binary: String,
-    /// KataGo analysis config file (`-config`).
+    /// KataGo analysis config file (`-config`). Defaults to a file next to the
+    /// binary if present, else `$XDG_DATA_HOME/katago-ws/analysis.cfg`.
     pub config: String,
-    /// KataGo model/weights file (`-model`).
+    /// KataGo model/weights file (`-model`). Same default rule as `config`.
     pub model: String,
     /// Max visits per analyzed position.
     pub max_visits: u32,
@@ -61,6 +71,22 @@ pub struct EngineConfig {
     pub default_board_size: u8,
     /// Per-game analysis timeout (seconds).
     pub request_timeout_secs: u64,
+    /// How long to wait for KataGo to report ready before giving up and
+    /// proceeding anyway. **Not a failure on expiry** — only an actual process
+    /// exit during the window is treated as one — because a fresh GPU host's
+    /// first-run CUDA/OpenCL autotune can take several minutes.
+    pub startup_timeout_secs: u64,
+    /// Auto-tune KataGo's thread/batch settings for this host on first launch
+    /// (via `katago benchmark -tune`), caching the result so later launches
+    /// skip it. Defaults to true — first-run auto-configuration, no flag to
+    /// discover — but a multi-minute benchmark on every start is a real cost
+    /// for Docker/CI/compose, so those deployments should set this false
+    /// (`MUXA_ENGINE__AUTO_TUNE=false`; the shipped `Dockerfile`/
+    /// `docker-compose.yml` already do). A failed/skipped tune is never
+    /// fatal — it just leaves KataGo on its stock config.
+    pub auto_tune: bool,
+    /// Timeout for the one-time `katago benchmark -tune` run.
+    pub tune_timeout_secs: u64,
 }
 
 impl Default for EngineConfig {
@@ -80,6 +106,9 @@ impl Default for EngineConfig {
             default_komi: default_komi(),
             default_board_size: default_board_size(),
             request_timeout_secs: default_timeout(),
+            startup_timeout_secs: default_startup_timeout(),
+            auto_tune: true,
+            tune_timeout_secs: default_tune_timeout(),
         }
     }
 }

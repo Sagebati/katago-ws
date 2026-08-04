@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -24,6 +24,7 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::config::EngineConfig;
+use crate::engine::preflight::EngineLaunch;
 use crate::engine::sgf::{Color, ColoredMove, ParsedGame, Rules};
 use crate::error::{AppError, AppResult};
 
@@ -288,25 +289,44 @@ pub struct KataGo {
 }
 
 impl KataGo {
-    /// Spawn the analysis engine. Fails clearly if the binary/model are absent.
-    pub async fn spawn(cfg: &EngineConfig) -> AppResult<Arc<Self>> {
-        let mut child = Command::new(&cfg.binary)
+    /// Spawn the analysis engine against a preflight-validated [`EngineLaunch`].
+    /// Waits (up to `cfg.startup_timeout_secs`) for KataGo's own ready signal
+    /// so a bad model/config/GPU-driver crash is caught here, at startup, in
+    /// place of the old "silent success, fails on the first job" behavior.
+    /// Expiry of that wait is **not** treated as failure — only a real process
+    /// exit during the window is — since a fresh GPU host's first-run
+    /// CUDA/OpenCL autotune can take several minutes.
+    pub async fn spawn(cfg: &EngineConfig, launch: &EngineLaunch) -> AppResult<Arc<Self>> {
+        let mut command = Command::new(&launch.binary);
+        command
             .arg("analysis")
             .arg("-config")
-            .arg(&cfg.config)
+            .arg(&launch.config)
             .arg("-model")
-            .arg(&cfg.model)
+            .arg(&launch.model);
+        if !launch.overrides.is_empty() {
+            let joined = launch
+                .overrides
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            command.arg("-override-config").arg(joined);
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|err| {
-                AppError::ModelLoad(format!(
-                    "failed to launch '{} analysis': {err} (is KataGo installed?)",
-                    cfg.binary
-                ))
-            })?;
+            .map_err(|err| spawn_error(&launch.binary, &err))?;
+
+        tracing::info!(
+            binary = %launch.binary.display(),
+            config = %launch.config.display(),
+            model = %launch.model.display(),
+            "launched katago analysis"
+        );
 
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
@@ -327,13 +347,82 @@ impl KataGo {
             }
         });
 
-        // Surface KataGo's stderr (startup diagnostics, tuning, errors).
+        // Stderr: teed to the startup handshake below (logged at `info!`)
+        // while it's listening; once that ends, falls back to `debug!` — a
+        // single owner task decides which, so no shared state is needed.
+        let (startup_tx, mut startup_rx) = mpsc::channel::<String>(64);
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
+            let mut tee = Some(startup_tx);
             while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(target: "katago", "{line}");
+                let forwarded = match &tee {
+                    Some(tx) if tx.send(line.clone()).await.is_ok() => true,
+                    Some(_) => {
+                        tee = None;
+                        false
+                    }
+                    None => false,
+                };
+                if !forwarded {
+                    tracing::debug!(target: "katago", "{line}");
+                }
             }
         });
+
+        let startup_timeout = Duration::from_secs(cfg.startup_timeout_secs.max(1));
+        let started = Instant::now();
+        let mut ready = false;
+        // `tee_open` only gates the `recv` branch below — it must NOT end the
+        // loop by itself. Stderr EOF and the process actually exiting are two
+        // separate events that race close together (the fake-katago
+        // regression test below exercises exactly this): if EOF alone ended
+        // the loop, a real startup crash could be missed whenever `recv`
+        // happens to win that race, falling through to "success" instead of
+        // reporting the crash. The loop only ever ends via an explicit
+        // `break` (ready, or timeout) or `return Err` (a real exit) — never
+        // because the tee closed.
+        let mut tee_open = true;
+        loop {
+            tokio::select! {
+                line = startup_rx.recv(), if tee_open => match line {
+                    Some(line) => {
+                        tracing::info!(target: "katago", "{line}");
+                        if is_ready_line(&line) {
+                            ready = true;
+                            break;
+                        }
+                    }
+                    None => tee_open = false,
+                },
+                status = child.wait() => {
+                    let status = status.map_err(|err| {
+                        AppError::EngineStartup(format!("failed to wait on katago process: {err}"))
+                    })?;
+                    return Err(AppError::EngineStartup(format!(
+                        "KataGo exited during startup with {status} — the model ({}) or \
+                         analysis config ({}) is probably wrong for this KataGo build. \
+                         Check the log lines above for KataGo's own diagnostic output.",
+                        launch.model.display(),
+                        launch.config.display(),
+                    )));
+                }
+                () = tokio::time::sleep(startup_timeout) => {
+                    tracing::warn!(
+                        elapsed_secs = started.elapsed().as_secs(),
+                        "KataGo has not reported ready yet; continuing anyway — first-run \
+                         GPU tuning can take several minutes"
+                    );
+                    break;
+                }
+            }
+        }
+        if ready {
+            tracing::info!(
+                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "KataGo analysis engine ready"
+            );
+        }
+        drop(startup_rx);
 
         // Owner: the sole holder of stdin, the pending table, the id counter,
         // and the child — so the whole protocol runs without locks.
@@ -343,6 +432,13 @@ impl KataGo {
             cmd_tx,
             timeout: Duration::from_secs(cfg.request_timeout_secs.max(1)),
         }))
+    }
+
+    /// Whether the owner task is still running (i.e. KataGo hasn't died).
+    /// Free: the owner task drops its receiver on exit, which flips this.
+    #[must_use]
+    pub fn is_alive(&self) -> bool {
+        !self.cmd_tx.is_closed()
     }
 
     /// Analyze a whole game: returns one [`TurnResponse`] per turn `0..=moves`.
@@ -394,15 +490,44 @@ impl KataGo {
     }
 }
 
+/// Wrap a `Command::spawn()` failure with an actionable hint. Preflight
+/// (`engine::preflight::check`) already validates the binary before this is
+/// ever reached, so this is a residual net for a TOCTOU race, a wrong-arch
+/// binary (`ENOEXEC`), or a KataGo AppImage with no FUSE available.
+fn spawn_error(binary: &std::path::Path, err: &std::io::Error) -> AppError {
+    let hint = match err.kind() {
+        std::io::ErrorKind::NotFound => {
+            "it passed preflight but is gone now — did something remove it?"
+        }
+        std::io::ErrorKind::PermissionDenied => "check it's executable: chmod +x <path>",
+        _ => {
+            "if this is a KataGo AppImage release and the host has no FUSE, try: \
+             APPIMAGE_EXTRACT_AND_RUN=1"
+        }
+    };
+    AppError::EngineStartup(format!(
+        "failed to launch '{} analysis': {err} ({hint})",
+        binary.display()
+    ))
+}
+
+/// Best-effort detection of KataGo's own "ready" line on stderr. If wording
+/// ever drifts in a future KataGo release and this stops matching, startup
+/// just falls through to the timeout path — degraded, not broken.
+fn is_ready_line(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    lower.contains("ready to begin handling requests") || lower.contains("started, ready")
+}
+
 /// The single owner of stdin and the pending table. Assigns ids, writes
 /// queries, and resolves replies as turn responses arrive — all from one task,
 /// so the state is plain (no `Mutex`/`Arc`/atomics).
 ///
-/// `child` is held only to keep the subprocess alive: when every [`KataGo`]
-/// handle is dropped, `cmd_rx` closes, this loop ends, and dropping `child`
-/// triggers `kill_on_drop`.
+/// `child` is held live (not just to keep the subprocess alive via
+/// `kill_on_drop`) so a mid-life exit can report the real exit status instead
+/// of a bare "process exited".
 async fn owner_loop(
-    _child: Child,
+    mut child: Child,
     mut stdin: ChildStdin,
     mut cmd_rx: mpsc::Receiver<AnalyzeCmd>,
     mut line_rx: mpsc::Receiver<String>,
@@ -445,9 +570,16 @@ async fn owner_loop(
             line = line_rx.recv() => match line {
                 Some(line) => handle_line(&mut pending, &line),
                 None => {
-                    // stdout closed → process gone; fail everything outstanding.
+                    // stdout closed → process gone; report the real exit status
+                    // rather than a bare "process exited", and fail everything
+                    // outstanding.
+                    let status = match child.wait().await {
+                        Ok(status) => status.to_string(),
+                        Err(err) => format!("unknown ({err})"),
+                    };
+                    tracing::error!(status = %status, "KataGo process exited unexpectedly");
                     for (_, req) in pending.drain() {
-                        let _ = req.tx.send(Err("katago process exited".into()));
+                        let _ = req.tx.send(Err(format!("katago process exited: {status}")));
                     }
                     break;
                 }
@@ -681,5 +813,15 @@ mod tests {
             owned.ownership.as_deref(),
             Some([0.5, -0.5, 1.0, -1.0].as_slice())
         );
+    }
+
+    #[test]
+    fn is_ready_line_matches_the_expected_marker_case_insensitively() {
+        assert!(is_ready_line(
+            "Beginning GTP loop; Ready to begin handling requests"
+        ));
+        assert!(is_ready_line("READY TO BEGIN HANDLING REQUESTS"));
+        assert!(!is_ready_line("Loading model..."));
+        assert!(!is_ready_line(""));
     }
 }

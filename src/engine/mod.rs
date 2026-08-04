@@ -3,7 +3,9 @@
 
 pub mod annotate;
 pub mod katago;
+pub mod preflight;
 pub mod sgf;
+pub mod tune;
 
 use std::sync::Arc;
 
@@ -21,9 +23,16 @@ pub struct AnalysisEngine {
 }
 
 impl AnalysisEngine {
-    /// Spawn the KataGo analysis engine subprocess.
+    /// Preflight-check the binary/config/model, optionally auto-tune, then
+    /// spawn the KataGo analysis engine subprocess.
     pub async fn spawn(cfg: EngineConfig) -> AppResult<Self> {
-        let katago = KataGo::spawn(&cfg).await?;
+        let mut launch = preflight::check(&cfg)?;
+        if cfg.auto_tune
+            && let Some(tuning) = tune::resolve(&launch, &cfg).await
+        {
+            launch.overrides = tuning.overrides();
+        }
+        let katago = KataGo::spawn(&cfg, &launch).await?;
         Ok(Self { katago, cfg })
     }
 
@@ -32,6 +41,12 @@ impl AnalysisEngine {
         let game = sgf::parse(sgf, self.cfg.default_board_size, self.cfg.default_komi)?;
         let turns = self.katago.analyze(&game, &self.cfg).await?;
         Ok(annotate::assemble(&game, turns, &self.cfg))
+    }
+
+    /// Whether the KataGo subprocess is still alive.
+    #[must_use]
+    pub fn is_alive(&self) -> bool {
+        self.katago.is_alive()
     }
 }
 
@@ -52,12 +67,15 @@ impl<S: State> Plugin<S> for KataGoEnginePlugin {
     ) -> Result<Arc<AnalysisEngine>> {
         tracing::info!(
             binary = %cfg.binary,
+            config = %cfg.config,
             model = %cfg.model,
             max_visits = cfg.max_visits,
+            auto_tune = cfg.auto_tune,
             "launching KataGo analysis engine"
         );
+        // `AnalysisEngine::spawn` (via `KataGo::spawn`) logs the actual
+        // "ready" claim itself, once confirmed — nothing unconditional here.
         let engine = AnalysisEngine::spawn(cfg).await.map_err(Error::other)?;
-        tracing::info!("KataGo analysis engine ready");
         Ok(Arc::new(engine))
     }
 }

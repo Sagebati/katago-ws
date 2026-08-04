@@ -28,9 +28,12 @@ pub enum AppError {
     /// ONNX inference failed.
     #[error("inference error: {0}")]
     Inference(String),
-    /// Model/encoder could not be constructed.
-    #[error("model load error: {0}")]
-    ModelLoad(String),
+    /// The KataGo analysis engine could not be started (binary/model/config
+    /// missing or invalid, or the process crashed during startup). Message is
+    /// already a complete, actionable, possibly multi-line block — see
+    /// `engine::preflight::PreflightError`.
+    #[error("{0}")]
+    EngineStartup(String),
     /// Database access failed.
     #[error("database error: {0}")]
     Db(String),
@@ -44,6 +47,13 @@ pub enum AppError {
 
 /// Convenience alias used throughout the crate.
 pub type AppResult<T> = Result<T, AppError>;
+
+/// A preflight failure is already a complete, formatted `AppError` message.
+impl From<crate::engine::preflight::PreflightError> for AppError {
+    fn from(err: crate::engine::preflight::PreflightError) -> Self {
+        AppError::EngineStartup(err.to_string())
+    }
+}
 
 /// Lets `AppError` be the error type of a `diesel_async` transaction (whose
 /// bound requires `From<diesel::result::Error>` for transaction-management
@@ -68,7 +78,7 @@ impl IntoResponse for AppError {
             AppError::Sgf(_) => StatusCode::BAD_REQUEST,
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::Inference(_)
-            | AppError::ModelLoad(_)
+            | AppError::EngineStartup(_)
             | AppError::Db(_)
             | AppError::Queue(_)
             | AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,

@@ -26,9 +26,11 @@ mod engine;
 mod error;
 mod http;
 mod metrics;
+mod paths;
 mod queue;
 mod worker;
 
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use muxa::prelude::*;
@@ -76,7 +78,17 @@ impl Role {
 }
 
 #[tokio::main]
-async fn main() -> muxa::Result<()> {
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            report(&err);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> muxa::Result<()> {
     let role = Role::resolve().map_err(Error::other)?;
     tracing::info!(?role, "starting katago-ws");
     match role {
@@ -86,10 +98,59 @@ async fn main() -> muxa::Result<()> {
     }
 }
 
+/// Turn a startup failure into one readable message instead of the raw
+/// `Debug`-formatted error chain (which buries a carefully-written message,
+/// e.g. a preflight hint, inside nested struct/enum syntax exposing internal
+/// Rust type names). Walks `source()` so the actual cause — not just "a
+/// plugin failed during build" — reaches the operator.
+fn report(err: &muxa::Error) {
+    let mut lines = vec![err.to_string()];
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        lines.push(cause.to_string());
+        source = cause.source();
+    }
+    let message = lines.join("\n  caused by: ");
+    // The tracing subscriber is installed once the figment is built
+    // (`BuildCtx::new`); the one failure that can happen before that is an
+    // unknown `--role` (`Role::resolve`, above) — exactly what a first-time
+    // user might hit, so it must still be visible.
+    if tracing::dispatcher::has_been_set() {
+        tracing::error!("{message}");
+    } else {
+        #[allow(
+            clippy::print_stderr,
+            reason = "fatal startup error before the tracing subscriber exists"
+        )]
+        {
+            eprintln!("Error: {message}");
+        }
+    }
+}
+
+/// Build the app from the resolved config-file location (`$MUXA_CONFIG` >
+/// `./muxa.toml` > the XDG config path > the bare default), logging which one
+/// won so "which config is this process actually using?" has one answer.
+///
+/// The log comes *after* construction, not before: the tracing subscriber
+/// isn't installed until `BuildCtx::new` runs as part of building the app
+/// (see `report`'s doc comment) — logging first would silently vanish, same
+/// as the pre-existing `tracing::info!(?role, ...)` in `run()` above.
+fn build_app() -> App {
+    let source = paths::resolve_config_file();
+    let app = App::with_config_file(source.path());
+    tracing::info!(
+        config = %source.path().display(),
+        origin = source.origin(),
+        "resolved configuration file"
+    );
+    app
+}
+
 /// `standalone`: the original single-process deployment — web API and in-process
 /// workers sharing one Postgres/pgmq.
 async fn run_standalone() -> muxa::Result<()> {
-    let app = App::default()
+    let app = build_app()
         .with_plugin(SentryPlugin)
         .await?
         .with_plugin(OtelPlugin)
@@ -106,8 +167,8 @@ async fn run_standalone() -> muxa::Result<()> {
 
     let db = Selector::<DieselPool, _>::select(app.state()).clone();
     let engine = Arc::clone(Selector::<Arc<AnalysisEngine>, _>::select(app.state()));
-    let worker_cfg = extract::<WorkerConfig>(&app, "worker");
-    let rl_cfg = extract::<RateLimitConfig>(&app, "ratelimit");
+    let worker_cfg = extract::<WorkerConfig>(&app, "worker")?;
+    let rl_cfg = extract::<RateLimitConfig>(&app, "ratelimit")?;
 
     let mut app = app;
     worker::register(app.ctx_mut(), db.clone(), engine, worker_cfg);
@@ -127,7 +188,7 @@ async fn run_standalone() -> muxa::Result<()> {
 /// `orchestrator`: web API + pgmq + the cluster WebSocket dispatcher; no engine.
 /// Owns the DB and proxies work to remote workers.
 async fn run_orchestrator() -> muxa::Result<()> {
-    let app = App::default()
+    let app = build_app()
         .with_plugin(SentryPlugin)
         .await?
         .with_plugin(OtelPlugin)
@@ -140,9 +201,9 @@ async fn run_orchestrator() -> muxa::Result<()> {
         .await?;
 
     let db = Selector::<DieselPool, _>::select(app.state()).clone();
-    let worker_cfg = extract::<WorkerConfig>(&app, "worker");
-    let orch_cfg = extract::<OrchestratorConfig>(&app, "orchestrator");
-    let rl_cfg = extract::<RateLimitConfig>(&app, "ratelimit");
+    let worker_cfg = extract::<WorkerConfig>(&app, "worker")?;
+    let orch_cfg = extract::<OrchestratorConfig>(&app, "orchestrator")?;
+    let rl_cfg = extract::<RateLimitConfig>(&app, "ratelimit")?;
     // Connection lifetimes derive from the app-wide shutdown token.
     let shutdown = app.ctx().shutdown.clone();
 
@@ -167,7 +228,7 @@ async fn run_orchestrator() -> muxa::Result<()> {
 /// `worker`: KataGo engine + cluster WebSocket client dialing the orchestrator; no
 /// Postgres. Serves only `/health` so `App::run` has a serve loop and probes have a target.
 async fn run_worker() -> muxa::Result<()> {
-    let app = App::default()
+    let app = build_app()
         .with_plugin(SentryPlugin)
         .await?
         .with_plugin(OtelPlugin)
@@ -176,15 +237,34 @@ async fn run_worker() -> muxa::Result<()> {
         .await?;
 
     let engine = Arc::clone(Selector::<Arc<AnalysisEngine>, _>::select(app.state()));
-    let worker_cfg = extract::<WorkerConfig>(&app, "worker");
+    let worker_cfg = extract::<WorkerConfig>(&app, "worker")?;
 
     let mut app = app;
+    let engine_for_health = Arc::clone(&engine);
     cluster::client::register_client(app.ctx_mut(), engine, worker_cfg);
 
-    app.with_plugin(WebPlugin::new(health_routes))
-        .await?
-        .run()
-        .await
+    // `/health` reflects whether the KataGo subprocess is actually still
+    // alive (not a static "ok") — so the orchestrator stops routing jobs to
+    // a worker whose engine has died, instead of only learning via failed
+    // jobs.
+    app.with_plugin(WebPlugin::new(move |_state: &_| {
+        axum::Router::new().route(
+            "/health",
+            axum::routing::get(move || {
+                let engine = Arc::clone(&engine_for_health);
+                async move {
+                    if engine.is_alive() {
+                        (axum::http::StatusCode::OK, "ok")
+                    } else {
+                        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "engine down")
+                    }
+                }
+            }),
+        )
+    }))
+    .await?
+    .run()
+    .await
 }
 
 /// Finish + serve the aide API (shared by `standalone` and `orchestrator`). `ApiPlugin`
@@ -202,12 +282,18 @@ async fn serve_api<S: State>(
         .await
 }
 
-/// Extract a config section, falling back to its default when absent/invalid.
-fn extract<T: serde::de::DeserializeOwned + Default>(app: &AppBuilder<impl State>, key: &str) -> T {
-    app.ctx().figment().extract_inner(key).unwrap_or_default()
-}
-
-/// Minimal routes for the `worker` role: just a liveness/readiness `/health`.
-fn health_routes<S>(_state: &S) -> axum::Router {
-    axum::Router::new().route("/health", axum::routing::get(|| async { "ok" }))
+/// Extract a config section, defaulting when it's genuinely absent but
+/// propagating a real error when it's present-and-malformed (e.g.
+/// `concurrency = "two"`). A typo silently running on defaults instead of
+/// failing loudly is exactly the class of confusing failure the rest of this
+/// startup path works hard to eliminate.
+fn extract<T: serde::de::DeserializeOwned + Default>(
+    app: &AppBuilder<impl State>,
+    key: &str,
+) -> muxa::Result<T> {
+    match app.ctx().figment().extract_inner(key) {
+        Ok(value) => Ok(value),
+        Err(err) if err.missing() => Ok(T::default()),
+        Err(err) => Err(err.into()),
+    }
 }

@@ -45,15 +45,35 @@ max_connections = 10
 
 [engine]
 # KataGo analysis engine. The service launches `katago analysis -config <config>
-# -model <model>` as a long-lived subprocess and drives it over JSON. These are
-# the local-dev paths (the container overrides them via MUXA_ENGINE__BINARY /
-# MUXA_ENGINE__CONFIG / MUXA_ENGINE__MODEL).
-binary = "katago"
-config = "analysis.cfg"
-model = "model.bin.gz"
+# -model <model>` as a long-lived subprocess and drives it over JSON.
+#
+# binary/config/model are commented out here on purpose: `src/config.rs`'s
+# defaults already do the right thing without pinning them — `binary` resolves
+# against $PATH, and `config`/`model` prefer a same-named file next to the
+# binary (this repo checkout) and otherwise fall back to
+# $XDG_DATA_HOME/katago-ws/{analysis.cfg,model.bin.gz}. The container overrides
+# all three explicitly via MUXA_ENGINE__BINARY / MUXA_ENGINE__CONFIG /
+# MUXA_ENGINE__MODEL regardless, so this is purely a bare-metal/local-dev
+# convenience. Uncomment to pin explicit paths.
+# binary = "katago"
+# config = "analysis.cfg"
+# model = "model.bin.gz"
 # Analysis tuning (max_visits, analysis_pv_len, include_ownership, top_k,
 # default_komi, default_board_size, request_timeout_secs) defaults to the values
 # in `src/config.rs`; override any of them here or via MUXA_ENGINE__* env vars.
+#
+# Auto-tune KataGo's thread/batch settings for this host on first launch (via
+# `katago benchmark -tune`), caching the result under
+# $XDG_STATE_HOME/katago-ws/tuning.json. Defaults to true; Docker/compose set
+# MUXA_ENGINE__AUTO_TUNE=false since a multi-minute benchmark on every
+# container start isn't worth it there.
+# auto_tune = true
+# How long to wait for KataGo's ready signal before proceeding anyway (not a
+# failure — first-run GPU autotune can take minutes; only an actual crash
+# during this window is treated as a startup failure).
+# startup_timeout_secs = 60
+# Timeout for the one-time auto-tune benchmark run.
+# tune_timeout_secs = 1800
 
 [ratelimit]
 # Per-IP rate limit on POST /analyse (the only endpoint that queues KataGo work).
