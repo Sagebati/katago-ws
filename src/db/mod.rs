@@ -18,7 +18,7 @@ use diesel::{
 };
 use diesel_async::{AsyncConnection as _, RunQueryDsl as _};
 use muxa::prelude::DieselPool;
-use pgmq::Queue as _;
+use pgmq::queue::Queue as _;
 use serde_json::Value as Json;
 use uuid::Uuid;
 
@@ -50,7 +50,8 @@ pub async fn submit(pool: &DieselPool, sgf: String) -> AppResult<Uuid> {
             .returning(jobs::id)
             .get_result(conn)
             .await?;
-        conn.send(Queue::Analysis.as_str(), &JobMessage { job_id, sgf })
+        // No headers, no delay.
+        conn.send(Queue::Analysis.as_str(), &JobMessage { job_id, sgf }, (), 0)
             .await
             .map_err(|err| AppError::Queue(err.to_string()))?;
         Ok(job_id)

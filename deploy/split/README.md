@@ -3,8 +3,7 @@
 The `orchestrator` owns Postgres + the queue and dispatches analysis to remote
 `worker` machines over a WebSocket (`/cluster`, on the orchestrator's web port).
 Workers run KataGo and **never touch Postgres** — they only dial the orchestrator.
-This is the topology the cluster split was built for (and why it doesn't fit
-Cloudflare Containers).
+This is the topology the cluster split was built for.
 
 ```
         HTTP + WS :3000               ws(s)://…:3000/cluster (Bearer auth)

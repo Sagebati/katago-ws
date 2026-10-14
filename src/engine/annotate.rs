@@ -14,12 +14,12 @@
 //! different operations that coincide only when the engine reports side-to-move.
 //! See [`crate::engine::katago::Perspective`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::Serialize;
 
 use crate::config::EngineConfig;
-use crate::engine::katago::{REPORT_PERSPECTIVE, TurnResponse};
+use crate::engine::katago::{Eval, REPORT_PERSPECTIVE, RootInfo, TurnResponse};
 use crate::engine::sgf::{Color, ParsedGame, Rules};
 
 /// The payload contract version.
@@ -174,6 +174,11 @@ pub struct EngineInfo {
     pub report_perspective: &'static str,
     /// Whether ownership maps were requested.
     pub ownership: bool,
+    /// Visits of the screening pass, when two-pass analysis ran: positions
+    /// around moves that looked quiet at this depth were not re-searched at
+    /// `max_visits` (each candidate's `visits` shows the depth it got).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screen_visits: Option<u32>,
 }
 
 /// Full analysis payload.
@@ -347,6 +352,60 @@ fn side_to_move_at(game: &ParsedGame, turn: usize) -> Color {
     )
 }
 
+/// The evaluations either side of a move by `color`, both in the mover's frame.
+///
+/// `before` is the mover's own turn; `after` is their opponent's — which is
+/// why reading the second one as-is (or merely negating it) is wrong unless
+/// the engine happens to report side-to-move.
+fn move_evals(
+    color: Color,
+    before: Option<&RootInfo>,
+    after: Option<&RootInfo>,
+) -> (Option<Eval>, Option<Eval>) {
+    (
+        before.map(|root| root.as_seen_by(color, color)),
+        after.map(|root| root.as_seen_by(color, color.other())),
+    )
+}
+
+/// The turns a screening pass says deserve a full-depth search.
+///
+/// Both turns either side of every move whose screened evaluation swings by at
+/// least `refine_winrate_delta` or `refine_score_delta` — in *either*
+/// direction: an apparent gain is as much a sign that a shallow search misread
+/// the position as an apparent loss. A move missing either evaluation is
+/// refined too, rather than trusted.
+pub fn turns_to_refine(
+    game: &ParsedGame,
+    screened: &[TurnResponse],
+    cfg: &EngineConfig,
+) -> BTreeSet<usize> {
+    let roots: HashMap<usize, &RootInfo> = screened
+        .iter()
+        .filter_map(|turn| turn.root_info.as_ref().map(|root| (turn.turn_number, root)))
+        .collect();
+
+    let mut refine = BTreeSet::new();
+    for (index, (color, _)) in game.moves.iter().enumerate() {
+        let swings = match move_evals(
+            *color,
+            roots.get(&index).copied(),
+            roots.get(&(index + 1)).copied(),
+        ) {
+            (Some(before), Some(after)) => {
+                (before.winrate - after.winrate).abs() >= cfg.refine_winrate_delta
+                    || (before.score_lead - after.score_lead).abs() >= cfg.refine_score_delta
+            }
+            _ => true,
+        };
+        if swings {
+            refine.insert(index);
+            refine.insert(index + 1);
+        }
+    }
+    refine
+}
+
 /// Warn once if KataGo's `currentPlayer` disagrees with the move list.
 ///
 /// A mismatch means the turn indices are skewed, which would attribute every
@@ -435,18 +494,14 @@ pub fn assemble(game: &ParsedGame, turns: Vec<TurnResponse>, cfg: &EngineConfig)
     let mut white = PlayerAccum::default();
 
     for (index, (color, mv)) in game.moves.iter().enumerate() {
-        // Both evaluations rotated into the mover's frame. Turn `index` is
-        // their own turn; turn `index + 1` is their opponent's — which is why
-        // reading the second one as-is (or merely negating it) is wrong unless
-        // the engine happens to report side-to-move.
-        let before = by_turn
-            .get(&index)
-            .and_then(|turn| turn.root_info.as_ref())
-            .map(|root| root.as_seen_by(*color, *color));
-        let after = by_turn
-            .get(&(index + 1))
-            .and_then(|turn| turn.root_info.as_ref())
-            .map(|root| root.as_seen_by(*color, color.other()));
+        // Both evaluations rotated into the mover's frame (see `move_evals`).
+        let (before, after) = move_evals(
+            *color,
+            by_turn.get(&index).and_then(|turn| turn.root_info.as_ref()),
+            by_turn
+                .get(&(index + 1))
+                .and_then(|turn| turn.root_info.as_ref()),
+        );
 
         let best_winrate = before.map_or(0.5, |eval| eval.winrate);
         let winrate = after.map_or(best_winrate, |eval| eval.winrate);
@@ -529,6 +584,7 @@ pub fn assemble(game: &ParsedGame, turns: Vec<TurnResponse>, cfg: &EngineConfig)
             top_k: cfg.top_k,
             report_perspective: REPORT_PERSPECTIVE.as_katago_setting(),
             ownership: !ownership.is_empty(),
+            screen_visits: cfg.two_pass().then_some(cfg.screen_visits),
         },
         ownership,
     }
@@ -798,5 +854,80 @@ mod tests {
         assert_eq!(analysis.engine.max_visits, 100);
         assert_eq!(analysis.engine.top_k, 7);
         assert_eq!(analysis.engine.report_perspective, "SIDETOMOVE");
+    }
+
+    /// Screened turns for [`tiny_game`] (B, W, B to move), each `(winrate,
+    /// score_lead)` from the side to move; `None` drops the turn's root.
+    fn screened(evals: [Option<(f32, f32)>; 3]) -> Vec<TurnResponse> {
+        let players = ["B", "W", "B"];
+        evals
+            .into_iter()
+            .enumerate()
+            .map(|(turn, eval)| {
+                let root = eval.map(|(winrate, score)| {
+                    serde_json::json!({
+                        "winrate": winrate, "scoreLead": score,
+                        "currentPlayer": players[turn], "visits": 16
+                    })
+                });
+                serde_json::from_value(serde_json::json!({
+                    "id": "q0", "turnNumber": turn, "rootInfo": root, "moveInfos": []
+                }))
+                .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn quiet_moves_are_not_refined() {
+        let turns = screened([Some((0.5, 0.0)), Some((0.51, -0.4)), Some((0.5, 0.2))]);
+        assert!(turns_to_refine(&tiny_game(), &turns, &cfg(5)).is_empty());
+    }
+
+    #[test]
+    fn a_swing_refines_both_sides_of_the_move() {
+        // White's move (turn 1 → 2) hands Black a won game: refine turns 1 and 2.
+        let turns = screened([Some((0.5, 0.0)), Some((0.5, 0.0)), Some((0.9, 5.0))]);
+        let refine: Vec<_> = turns_to_refine(&tiny_game(), &turns, &cfg(5))
+            .into_iter()
+            .collect();
+        assert_eq!(refine, vec![1, 2]);
+    }
+
+    #[test]
+    fn a_score_swing_alone_triggers_refinement() {
+        // Win rate barely moves (a decided game) but two points change hands.
+        let turns = screened([Some((0.99, 20.0)), Some((0.01, -18.0)), Some((0.99, 18.0))]);
+        let refine: Vec<_> = turns_to_refine(&tiny_game(), &turns, &cfg(5))
+            .into_iter()
+            .collect();
+        assert_eq!(refine, vec![0, 1]);
+    }
+
+    #[test]
+    fn an_apparent_gain_or_a_missing_eval_is_refined_too() {
+        // Black's move "gains" 0.3 for Black — a misread, not a free lunch.
+        let gain = screened([Some((0.5, 0.0)), Some((0.2, -3.0)), Some((0.8, 3.0))]);
+        assert!(turns_to_refine(&tiny_game(), &gain, &cfg(5)).contains(&0));
+
+        let missing = screened([Some((0.5, 0.0)), None, Some((0.5, 0.0))]);
+        let refine: Vec<_> = turns_to_refine(&tiny_game(), &missing, &cfg(5))
+            .into_iter()
+            .collect();
+        assert_eq!(refine, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn the_payload_records_the_screening_depth_only_when_it_ran() {
+        let turns = tiny_turns([None, None, None]);
+        let single = assemble(&tiny_game(), turns.clone(), &cfg(5));
+        assert_eq!(single.engine.screen_visits, None);
+
+        let two_pass = EngineConfig {
+            screen_visits: 16,
+            ..cfg(5)
+        };
+        let analysis = assemble(&tiny_game(), turns, &two_pass);
+        assert_eq!(analysis.engine.screen_visits, Some(16));
     }
 }

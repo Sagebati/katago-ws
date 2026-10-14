@@ -21,6 +21,7 @@ use muxa::diesel::DieselPool;
 use muxa::prelude::*;
 use pgmq::Message;
 use serde_json::Value as Json;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use crate::config::WorkerConfig;
@@ -117,7 +118,19 @@ pub async fn worker_loop<E: Executor>(
                 match res {
                     Ok(Some(msg)) => {
                         let msg_id = msg.msg_id;
-                        if let Err(err) = handle(&db, &executor, &cfg, msg).await {
+                        // One trace (a Sentry transaction) per delivery: lease,
+                        // analysis and the result writes as child spans. A root
+                        // span on purpose: under the long-lived `muxa.task` span
+                        // it would be a child of a transaction that only ends at
+                        // shutdown, and never reach Sentry on its own.
+                        let span = tracing::info_span!(
+                            parent: None,
+                            "analysis_job",
+                            job_id = %msg.message.job_id,
+                            msg_id,
+                            attempt = msg.read_ct,
+                        );
+                        if let Err(err) = handle(&db, &executor, &cfg, msg).instrument(span).await {
                             tracing::error!(error = %err, msg_id, "job processing failed");
                         }
                     }
@@ -176,13 +189,17 @@ async fn handle<E: Executor>(
     match result {
         Ok(value) => {
             let num_moves = value
-                .get("summary")
-                .and_then(|summary| summary.get("num_moves"))
+                .get("report")
+                .and_then(|report| report.get("num_moves"))
                 .and_then(serde_json::Value::as_u64);
             db::set_done(db, job_id, value).await?;
             // Success — and only now — remove the message from the queue.
             queue::archive(db, queue::Queue::Analysis, msg_id).await?;
-            crate::metrics::metrics().job_processed("done", Some(elapsed));
+            let metrics = crate::metrics::metrics();
+            metrics.job_processed("done", Some(elapsed));
+            if let Some(moves) = num_moves {
+                metrics.moves_analyzed(moves);
+            }
             tracing::info!(%job_id, num_moves, "analysis complete");
             Ok(())
         }

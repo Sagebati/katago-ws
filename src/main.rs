@@ -58,8 +58,8 @@ enum Role {
 impl Role {
     /// Resolve the launch role: the first CLI argument wins; if it's absent, the
     /// `KATAGO_WS_ROLE` environment variable is consulted (handy where setting
-    /// argv is awkward — e.g. a Cloudflare Container, whose command is fixed by
-    /// the image `ENTRYPOINT`); if neither is set, [`Role::Standalone`].
+    /// argv is awkward — e.g. a compose service that keeps the image's
+    /// `ENTRYPOINT`); if neither is set, [`Role::Standalone`].
     fn resolve() -> Result<Self, String> {
         let raw = std::env::args()
             .nth(1)
@@ -204,7 +204,7 @@ async fn serve_api<S: State>(
 
 /// Extract a config section, falling back to its default when absent/invalid.
 fn extract<T: serde::de::DeserializeOwned + Default>(app: &AppBuilder<impl State>, key: &str) -> T {
-    app.ctx().figment().extract_inner(key).unwrap_or_default()
+    app.figment().extract_inner(key).unwrap_or_default()
 }
 
 /// Minimal routes for the `worker` role: just a liveness/readiness `/health`.

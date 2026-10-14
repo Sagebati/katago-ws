@@ -1693,6 +1693,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "itertools"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b4baf93f58d4425749ca49a51c50ebab072c5df6994d08fed93541c331481dc"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1783,7 +1792,7 @@ dependencies = [
  "mimalloc",
  "muxa",
  "opentelemetry",
- "pgmq 0.34.0-alpha",
+ "pgmq",
  "rustls",
  "schemars",
  "secrecy",
@@ -1982,7 +1991,6 @@ dependencies = [
  "axum",
  "dupe",
  "figment",
- "futures",
  "http 1.4.2",
  "muxa-telemetry",
  "serde",
@@ -2034,6 +2042,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "serde",
+ "tokio",
  "tracing",
  "tracing-opentelemetry",
 ]
@@ -2046,7 +2055,7 @@ dependencies = [
  "diesel-async",
  "muxa-core",
  "muxa-diesel",
- "pgmq 0.34.0-alpha (git+https://github.com/Sagebati/pgmq?rev=e243a26a60a0c3a43eefca2051156556715e875e)",
+ "pgmq",
  "serde",
  "serde_json",
  "tracing",
@@ -2059,7 +2068,6 @@ dependencies = [
  "axum",
  "bon",
  "muxa-core",
- "muxa-telemetry",
  "secrecy",
  "sentry",
  "sentry-tower",
@@ -2072,7 +2080,6 @@ dependencies = [
 name = "muxa-telemetry"
 version = "0.1.0"
 dependencies = [
- "sentry-tracing",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2084,7 +2091,6 @@ dependencies = [
  "aide",
  "axum",
  "bon",
- "figment",
  "futures",
  "governor",
  "http 1.4.2",
@@ -2093,7 +2099,6 @@ dependencies = [
  "serde",
  "tokio",
  "tokio-util",
- "toml 0.8.23",
  "tower",
  "tower_governor",
  "tracing",
@@ -2533,22 +2538,8 @@ dependencies = [
 
 [[package]]
 name = "pgmq"
-version = "0.34.0-alpha"
-dependencies = [
- "async-trait",
- "chrono",
- "diesel",
- "diesel-async",
- "futures-util",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "pgmq"
-version = "0.34.0-alpha"
-source = "git+https://github.com/Sagebati/pgmq?rev=e243a26a60a0c3a43eefca2051156556715e875e#e243a26a60a0c3a43eefca2051156556715e875e"
+version = "0.34.0-alpha.7"
+source = "git+https://github.com/Sagebati/pgmq?rev=1ad05960c924c26a3c5d2269017ac10164482404#1ad05960c924c26a3c5d2269017ac10164482404"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2556,11 +2547,15 @@ dependencies = [
  "diesel-async",
  "futures-util",
  "include_dir",
- "itertools",
+ "itertools 0.15.0",
+ "log",
  "regex",
  "serde",
+ "serde_derive",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
 ]
 
 [[package]]
@@ -2733,7 +2728,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn",

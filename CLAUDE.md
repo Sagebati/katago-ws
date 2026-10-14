@@ -15,12 +15,15 @@ It is a thin **consumer of the local `muxa` framework** (path dep at
 `../muxa/crates/muxa`). Web server, Diesel/Postgres pool, pgmq, OpenTelemetry,
 Sentry, OpenAPI, and rate limiting are all muxa plugins composed in
 [`src/main.rs`](src/main.rs); this crate supplies the domain logic (engine, queue,
-job store, HTTP surface). `pgmq` is also a local path dep (`../pgmq/pgmq-rs`).
+job store, HTTP surface). `pgmq` is a **git** dep on the Sagebati fork at the same
+`rev` muxa pins in its root `Cargo.toml`, so cargo unifies them into one pgmq —
+bump the two together. Its `Queue` trait lives at `pgmq::queue::Queue` behind the
+`queue-experimental` feature.
 
 ## Commands
 
-Run from the `katago-ws/` directory. The build needs the sibling `../muxa` and
-`../pgmq` path-deps present.
+Run from the `katago-ws/` directory. The build needs the sibling `../muxa` path-dep
+present (at the `MUXA_REF` in `.github/sibling-refs.env`).
 
 ```bash
 # Run (role = first CLI arg; default `standalone`). Needs Postgres — see below.
@@ -191,8 +194,10 @@ triggers for `GITHUB_TOKEN`-authored pushes and the `v*.*.*` tag it pushes must 
 [`.github/sibling-refs.env`](.github/sibling-refs.env), read by
 [`.github/actions/checkout-siblings/`](.github/actions/checkout-siblings/action.yml)
 (used by `ci.yml`, `image.yml`, and `release.yml`'s `build-binary` job — `muxa` used to
-float on `ref: main`, which is why this exists). Bumping `muxa`/`pgmq` is a one-line
-change there, not a per-workflow edit.
+float on `ref: main`, which is why this exists). Bumping `muxa` is a one-line
+change there, not a per-workflow edit. The `pgmq` sibling is still checked out and
+copied into the image build context, but nothing path-depends on it any more (see
+the git dep above); keep `PGMQ_REF` equal to that rev until the checkout is removed.
 
 **The KataGo version + per-variant base/zip/pkgs trio live only in the
 [`justfile`](justfile)** (`katago_version` + `*_base`/`*_zip`/`*_pkgs`/`opencl_rusticl`

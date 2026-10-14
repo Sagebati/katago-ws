@@ -5,11 +5,16 @@
 //! unset), `global::meter` returns a no-op meter, so every instrument is a no-op
 //! and recording costs ~nothing — safe to call unconditionally from any role.
 //!
-//! Four instruments, matching the operational questions:
+//! Six instruments, matching the operational questions:
 //! - `katago_ws.workers.connected` — gauge: cluster workers with a live session.
 //! - `katago_ws.jobs.waiting`       — gauge: jobs queued and waiting to run.
 //! - `katago_ws.jobs.processed`     — counter (by `outcome`): job throughput.
 //! - `katago_ws.job.duration`       — histogram (seconds, by `outcome`): time per job.
+//! - `katago_ws.moves.analyzed`     — counter: moves in completed analyses. Its
+//!   rate is the service's throughput — jobs/s isn't, game lengths vary too much.
+//! - `katago_ws.positions.analyzed` — counter (by `pass` ∈ {full, screen,
+//!   refine}): positions KataGo searched — the engine's work, and with two-pass
+//!   analysis `refine / screen` is the share of positions searched in depth.
 //!
 //! Exported over OTLP to whatever collector `[otel].endpoint` points at
 //! (Prometheus/Grafana, an OTel Collector, …), on the `[otel].metric_interval_secs`
@@ -36,6 +41,8 @@ const NAME_WORKERS: &str = "katago_ws.workers.connected";
 const NAME_WAITING: &str = "katago_ws.jobs.waiting";
 const NAME_PROCESSED: &str = "katago_ws.jobs.processed";
 const NAME_DURATION: &str = "katago_ws.job.duration";
+const NAME_MOVES: &str = "katago_ws.moves.analyzed";
+const NAME_POSITIONS: &str = "katago_ws.positions.analyzed";
 
 /// Process-wide instrument handles, built once on first use.
 ///
@@ -55,6 +62,11 @@ pub struct Metrics {
     jobs_processed: Counter<u64>,
     /// Wall-clock seconds spent analyzing one job, tagged `outcome`.
     job_duration: Histogram<f64>,
+    /// Moves in successfully completed analyses.
+    moves_analyzed: Counter<u64>,
+    /// Positions KataGo searched, tagged `pass`. Recorded where the engine runs
+    /// (`standalone` or `worker`), not on the orchestrator.
+    positions_analyzed: Counter<u64>,
 }
 
 impl Metrics {
@@ -91,6 +103,23 @@ impl Metrics {
     }
 }
 
+impl Metrics {
+    /// Record the moves of one successfully analyzed game.
+    pub fn moves_analyzed(&self, moves: u64) {
+        self.moves_analyzed.add(moves, &[]);
+        sentry::metrics::counter(NAME_MOVES, moves as f64).capture();
+    }
+
+    /// Record `positions` searched by one KataGo `pass`.
+    pub fn positions_analyzed(&self, pass: &'static str, positions: u64) {
+        self.positions_analyzed
+            .add(positions, &[KeyValue::new("pass", pass)]);
+        sentry::metrics::counter(NAME_POSITIONS, positions as f64)
+            .attribute("pass", pass)
+            .capture();
+    }
+}
+
 /// The shared metrics handles (built on first access).
 pub fn metrics() -> &'static Metrics {
     static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -115,6 +144,14 @@ pub fn metrics() -> &'static Metrics {
                 .with_description("Wall-clock time to analyze one job")
                 // Buckets tuned for seconds-to-minutes KataGo analyses.
                 .with_boundaries(vec![0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0])
+                .build(),
+            moves_analyzed: meter
+                .u64_counter(NAME_MOVES)
+                .with_description("Moves in successfully analyzed games")
+                .build(),
+            positions_analyzed: meter
+                .u64_counter(NAME_POSITIONS)
+                .with_description("Positions searched by KataGo, by pass")
                 .build(),
         }
     })

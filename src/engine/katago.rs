@@ -249,6 +249,8 @@ struct AnalysisQuery {
     #[serde(rename = "analysisPVLen")]
     analysis_pv_len: u32,
     include_ownership: bool,
+    /// Scheduling priority within KataGo's queue (higher runs first).
+    priority: i32,
     /// Per-query settings that override the analysis config file.
     override_settings: OverrideSettings,
 }
@@ -290,12 +292,17 @@ pub struct KataGo {
 impl KataGo {
     /// Spawn the analysis engine. Fails clearly if the binary/model are absent.
     pub async fn spawn(cfg: &EngineConfig) -> AppResult<Arc<Self>> {
-        let mut child = Command::new(&cfg.binary)
+        let mut command = Command::new(&cfg.binary);
+        command
             .arg("analysis")
             .arg("-config")
             .arg(&cfg.config)
             .arg("-model")
-            .arg(&cfg.model)
+            .arg(&cfg.model);
+        if let Some(overrides) = cfg.katago_overrides() {
+            command.arg("-override-config").arg(overrides);
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -345,13 +352,23 @@ impl KataGo {
         }))
     }
 
-    /// Analyze a whole game: returns one [`TurnResponse`] per turn `0..=moves`.
+    /// Analyze `turns` of a game (turn `i` = the position before move `i + 1`)
+    /// at `max_visits` each: returns one [`TurnResponse`] per requested turn.
+    ///
+    /// `priority` orders this query against others in KataGo's queue (higher
+    /// first; turns of equal priority run in submission order).
     pub async fn analyze(
         &self,
         game: &ParsedGame,
         cfg: &EngineConfig,
+        turns: Vec<usize>,
+        max_visits: u32,
+        priority: i32,
     ) -> AppResult<Vec<TurnResponse>> {
-        let expected = game.moves.len() + 1; // turns 0..=moves.len()
+        let expected = turns.len();
+        if expected == 0 {
+            return Ok(Vec::new());
+        }
 
         // `id` is assigned by the owner task (keeps the correlation counter local).
         let query = AnalysisQuery {
@@ -362,10 +379,11 @@ impl KataGo {
             board_y_size: game.board_size,
             initial_stones: game.initial_stones.clone(),
             moves: game.moves.clone(),
-            analyze_turns: (0..expected).collect(),
-            max_visits: cfg.max_visits,
+            analyze_turns: turns,
+            max_visits,
             analysis_pv_len: cfg.analysis_pv_len,
             include_ownership: cfg.include_ownership,
+            priority,
             override_settings: OverrideSettings::default(),
         };
 
@@ -541,6 +559,7 @@ mod tests {
             max_visits: 100,
             analysis_pv_len: 10,
             include_ownership: true,
+            priority: 0,
             override_settings: OverrideSettings::default(),
         };
 

@@ -5,7 +5,8 @@
 use std::time::Duration;
 
 use muxa::diesel::DieselPool;
-use pgmq::{Message, Queue as _};
+use pgmq::Message;
+use pgmq::queue::Queue as _;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -40,6 +41,9 @@ pub struct JobMessage {
     pub sgf: String,
 }
 
+/// How often a long-poll re-checks the queue — pgmq's SQL default.
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 fn q_err<E: std::fmt::Display>(err: E) -> AppError {
     AppError::Queue(err.to_string())
 }
@@ -52,18 +56,18 @@ pub async fn read_one(
     poll: Duration,
 ) -> AppResult<Option<Message<JobMessage>>> {
     let mut conn = pool.0.get().await.map_err(q_err)?;
-    let msg = (&mut *conn)
-        .read_with_poll::<JobMessage>(queue.as_str(), vt_secs, Some(poll), None)
+    let msgs: Vec<Message<JobMessage>> = (&mut *conn)
+        .read_with_poll(queue.as_str(), vt_secs, 1, poll, POLL_INTERVAL)
         .await
         .map_err(q_err)?;
-    Ok(msg)
+    Ok(msgs.into_iter().next())
 }
 
 /// Archive a processed message (removes it from the active queue).
 pub async fn archive(pool: &DieselPool, queue: Queue, msg_id: i64) -> AppResult<()> {
     let mut conn = pool.0.get().await.map_err(q_err)?;
     (&mut *conn)
-        .archive(queue.as_str(), msg_id)
+        .archive(queue.as_str(), &[msg_id])
         .await
         .map_err(q_err)?;
     Ok(())
@@ -81,8 +85,8 @@ pub async fn extend_vt(
     vt_secs: i32,
 ) -> AppResult<()> {
     let mut conn = pool.0.get().await.map_err(q_err)?;
-    (&mut *conn)
-        .set_vt::<JobMessage>(queue.as_str(), msg_id, vt_secs)
+    let _: Vec<Message<JobMessage>> = (&mut *conn)
+        .set_vt(queue.as_str(), &[msg_id], vt_secs)
         .await
         .map_err(q_err)?;
     Ok(())

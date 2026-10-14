@@ -16,7 +16,10 @@
 ARG RUNTIME_BASE=debian:bookworm-slim
 ARG KATAGO_VERSION=v1.16.5
 ARG KATAGO_ZIP=katago-v1.16.5-eigen-linux-x64.zip
-ARG MODEL_URL=https://github.com/lightvector/KataGo/releases/download/v1.4.5/g170e-b20c256x2-s5303129600-d1228401921.bin.gz
+# KataGo's mainstream modern network (b18c384nbt, kata1 run) — the one KataGo's own
+# test scripts pin. Far stronger per visit than the 2020 g170 b20c256x2 it
+# replaces, at roughly the same cost per NN evaluation.
+ARG MODEL_URL=https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b18c384nbt-s9996604416-d4316597426.bin.gz
 ARG CONFIG_URL=https://raw.githubusercontent.com/lightvector/KataGo/${KATAGO_VERSION}/cpp/configs/analysis_example.cfg
 ARG RUNTIME_PKGS=ca-certificates
 
@@ -132,7 +135,7 @@ EXPOSE 3000
 # instead of compiled here — see .github/workflows/release.yml. Deliberately
 # defined BEFORE `runtime` below so `runtime` stays the last stage in the file
 # and is still what gets built by anything that invokes `docker build` without
-# an explicit --target (e.g. Cloudflare's wrangler.jsonc container build).
+# an explicit --target.
 FROM runtime-base AS runtime-prebuilt
 COPY --from=prebuilt /katago-ws /usr/local/bin/katago-ws
 USER app

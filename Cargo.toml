@@ -16,9 +16,11 @@ muxa = { path = "../muxa/crates/muxa", features = [
     # metrics, and logs. Endpoint configured via `[otel].endpoint`.
     "otel", "otel-otlp-tonic", "otel-tracing-bridge", "otel-metrics", "otel-logs",
 ] }
-# pgmq fork (local), same path muxa-pgmq depends on — one pgmq in the graph.
-# Used directly for the `Message`/`Queue` API in `queue.rs`.
-pgmq = { path = "../pgmq/pgmq-rs", default-features = false, features = ["diesel-async"] }
+# pgmq fork, the same git rev muxa pins (muxa's root Cargo.toml) so cargo
+# unifies the two into one pgmq in the graph — bump both together. Used directly
+# for the `Message`/`Queue` API in `queue.rs`; the `Queue` trait is gated behind
+# `queue-experimental` upstream.
+pgmq = { git = "https://github.com/Sagebati/pgmq", rev = "1ad05960c924c26a3c5d2269017ac10164482404", default-features = false, features = ["diesel-async", "queue-experimental"] }
 # SGF parsing — used to build the KataGo move list + game metadata.
 sgf-parser = "2"
 
@@ -26,7 +28,7 @@ sgf-parser = "2"
 # `worker` roles; see `src/cluster/`). The orchestrator serves the socket on its
 # existing axum web server (axum's `ws` feature); a worker dials it with
 # `tokio-tungstenite` (rustls + bundled webpki roots, so `wss://` works behind a
-# TLS terminator like Cloudflare with no system OpenSSL). `rustls` is a direct dep
+# TLS-terminating reverse proxy with no system OpenSSL). `rustls` is a direct dep
 # only to install a process-default crypto provider at worker startup.
 # Pinned to 0.29 to match the version axum 0.8's `ws` feature pulls — otherwise the
 # graph compiles two copies of tungstenite/tokio-tungstenite (a binary-size + build
