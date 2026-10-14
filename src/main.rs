@@ -204,7 +204,7 @@ async fn serve_api<S: State>(
 
 /// Extract a config section, falling back to its default when absent/invalid.
 fn extract<T: serde::de::DeserializeOwned + Default>(app: &AppBuilder<impl State>, key: &str) -> T {
-    app.ctx().figment().extract_inner(key).unwrap_or_default()
+    app.figment().extract_inner(key).unwrap_or_default()
 }
 
 /// Minimal routes for the `worker` role: just a liveness/readiness `/health`.

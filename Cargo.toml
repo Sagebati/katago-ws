@@ -16,9 +16,11 @@ muxa = { path = "../muxa/crates/muxa", features = [
     # metrics, and logs. Endpoint configured via `[otel].endpoint`.
     "otel", "otel-otlp-tonic", "otel-tracing-bridge", "otel-metrics", "otel-logs",
 ] }
-# pgmq fork (local), same path muxa-pgmq depends on — one pgmq in the graph.
-# Used directly for the `Message`/`Queue` API in `queue.rs`.
-pgmq = { path = "../pgmq/pgmq-rs", default-features = false, features = ["diesel-async"] }
+# pgmq fork, the same git rev muxa pins (muxa's root Cargo.toml) so cargo
+# unifies the two into one pgmq in the graph — bump both together. Used directly
+# for the `Message`/`Queue` API in `queue.rs`; the `Queue` trait is gated behind
+# `queue-experimental` upstream.
+pgmq = { git = "https://github.com/Sagebati/pgmq", rev = "1ad05960c924c26a3c5d2269017ac10164482404", default-features = false, features = ["diesel-async", "queue-experimental"] }
 # SGF parsing — used to build the KataGo move list + game metadata.
 sgf-parser = "2"
 
