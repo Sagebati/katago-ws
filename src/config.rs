@@ -36,6 +36,23 @@ fn default_board_size() -> u8 {
 fn default_timeout() -> u64 {
     600
 }
+/// Positions KataGo searches in parallel. A game is submitted as one query
+/// covering every turn, so there are always hundreds of positions waiting: the
+/// throughput preset (many positions × one thread each) keeps the NN batch full
+/// without threads contending over the same tree. 32 × 1 keeps the stock
+/// config's total of 32 search threads, so it is no heavier on any host.
+fn default_analysis_threads() -> u32 {
+    32
+}
+fn default_search_threads_per_analysis() -> u32 {
+    1
+}
+fn default_refine_winrate_delta() -> f32 {
+    0.03
+}
+fn default_refine_score_delta() -> f32 {
+    1.0
+}
 
 /// `[engine]` — how to launch and drive the KataGo analysis engine.
 #[derive(Debug, Clone, Deserialize)]
@@ -61,6 +78,70 @@ pub struct EngineConfig {
     pub default_board_size: u8,
     /// Per-game analysis timeout (seconds).
     pub request_timeout_secs: u64,
+
+    // KataGo search/batching tuning, passed as `-override-config` so it is set
+    // per deploy (env vars) without editing or rebuilding the shipped
+    // `analysis.cfg`. For each numeric knob, `0` keeps the config file's value.
+    /// `numAnalysisThreads`: positions searched in parallel.
+    pub analysis_threads: u32,
+    /// `numSearchThreadsPerAnalysisThread`: threads per position's search tree.
+    pub search_threads_per_analysis: u32,
+    /// `nnMaxBatchSize`: max positions per NN batch, per GPU. Should be at least
+    /// `analysis_threads * search_threads_per_analysis / GPUs`.
+    pub nn_max_batch_size: u32,
+    /// `numNNServerThreadsPerModel`: NN server threads (one per GPU).
+    pub nn_server_threads: u32,
+    /// Extra raw `key=value,key=value` overrides appended verbatim.
+    pub override_config: String,
+
+    // Two-pass analysis. Every turn is first searched with `screen_visits`;
+    // then only the turns around moves whose screened evaluation swings by at
+    // least a refine delta are re-searched at `max_visits`. Quiet moves (most
+    // of a game) keep their cheap screening result. `0` (the default), or a
+    // value `>= max_visits`, disables it: one pass at `max_visits`.
+    /// Visits per position in the screening pass.
+    pub screen_visits: u32,
+    /// Refine a move whose screened win-rate swing (either direction) is at
+    /// least this. Default: the inaccuracy threshold.
+    pub refine_winrate_delta: f32,
+    /// Refine a move whose screened score swing (points, either direction) is
+    /// at least this. Default: the inaccuracy threshold.
+    pub refine_score_delta: f32,
+}
+
+impl EngineConfig {
+    /// Whether the two-pass (screen, then refine) analysis is enabled.
+    #[must_use]
+    pub fn two_pass(&self) -> bool {
+        self.screen_visits > 0 && self.screen_visits < self.max_visits
+    }
+
+    /// The `-override-config` argument for KataGo, or `None` when nothing is
+    /// overridden.
+    #[must_use]
+    pub fn katago_overrides(&self) -> Option<String> {
+        let numeric = [
+            ("numAnalysisThreads", self.analysis_threads),
+            (
+                "numSearchThreadsPerAnalysisThread",
+                self.search_threads_per_analysis,
+            ),
+            ("nnMaxBatchSize", self.nn_max_batch_size),
+            ("numNNServerThreadsPerModel", self.nn_server_threads),
+        ];
+        let pairs = numeric
+            .into_iter()
+            .filter(|&(_, value)| value > 0)
+            .map(|(key, value)| format!("{key}={value}"));
+        let extra = self
+            .override_config
+            .split(',')
+            .map(str::trim)
+            .filter(|pair| !pair.is_empty())
+            .map(str::to_owned);
+        let joined = pairs.chain(extra).collect::<Vec<_>>().join(",");
+        (!joined.is_empty()).then_some(joined)
+    }
 }
 
 impl Default for EngineConfig {
@@ -80,12 +161,23 @@ impl Default for EngineConfig {
             default_komi: default_komi(),
             default_board_size: default_board_size(),
             request_timeout_secs: default_timeout(),
+            analysis_threads: default_analysis_threads(),
+            search_threads_per_analysis: default_search_threads_per_analysis(),
+            nn_max_batch_size: 0,
+            nn_server_threads: 0,
+            override_config: String::new(),
+            screen_visits: 0,
+            refine_winrate_delta: default_refine_winrate_delta(),
+            refine_score_delta: default_refine_score_delta(),
         }
     }
 }
 
+/// Games in flight per engine. Each one is hundreds of positions, so a few
+/// suffice to keep KataGo's queue from draining while one game's last turns
+/// finish (and, with two-pass analysis, while a game waits on its refinement).
 fn default_concurrency() -> usize {
-    2
+    4
 }
 fn default_visibility() -> i32 {
     600
@@ -172,5 +264,60 @@ impl Default for OrchestratorConfig {
         Self {
             auth_token: SecretString::from(String::new()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_overrides_pick_the_throughput_preset() {
+        assert_eq!(
+            EngineConfig::default().katago_overrides().as_deref(),
+            Some("numAnalysisThreads=32,numSearchThreadsPerAnalysisThread=1")
+        );
+    }
+
+    #[test]
+    fn zero_keeps_the_config_file_and_raw_overrides_are_appended() {
+        let cfg = EngineConfig {
+            analysis_threads: 0,
+            search_threads_per_analysis: 0,
+            nn_max_batch_size: 128,
+            override_config: " requireMaxBoardSize=true , ,maxBoardXSizeForNNBuffer=19".to_owned(),
+            ..EngineConfig::default()
+        };
+        assert_eq!(
+            cfg.katago_overrides().as_deref(),
+            Some("nnMaxBatchSize=128,requireMaxBoardSize=true,maxBoardXSizeForNNBuffer=19")
+        );
+
+        let none = EngineConfig {
+            analysis_threads: 0,
+            search_threads_per_analysis: 0,
+            ..EngineConfig::default()
+        };
+        assert_eq!(none.katago_overrides(), None);
+    }
+
+    #[test]
+    fn two_pass_needs_a_screen_shallower_than_the_full_search() {
+        let base = EngineConfig::default();
+        assert!(!base.two_pass());
+        assert!(
+            EngineConfig {
+                screen_visits: 16,
+                ..base.clone()
+            }
+            .two_pass()
+        );
+        assert!(
+            !EngineConfig {
+                screen_visits: base.max_visits,
+                ..base
+            }
+            .two_pass()
+        );
     }
 }

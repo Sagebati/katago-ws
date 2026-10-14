@@ -146,7 +146,10 @@ production, not the committed file.
 | `MUXA_WEB__HOST` / `MUXA_WEB__PORT` | Bind address (default `0.0.0.0:3000`). |
 | `MUXA_ENGINE__MAX_VISITS` | KataGo visits per move. **Keep modest (8–50)** so a game finishes inside the lease. |
 | `MUXA_ENGINE__BINARY` / `__CONFIG` / `__MODEL` | KataGo paths (the image sets these). |
-| `MUXA_WORKER__CONCURRENCY` | Worker lease loops / advertised slots. |
+| `MUXA_ENGINE__ANALYSIS_THREADS` / `__SEARCH_THREADS_PER_ANALYSIS` | KataGo `numAnalysisThreads` × `numSearchThreadsPerAnalysisThread` (default `32` × `1`: the throughput preset). See [Throughput tuning](#throughput-tuning). |
+| `MUXA_ENGINE__NN_MAX_BATCH_SIZE` / `__NN_SERVER_THREADS` / `__OVERRIDE_CONFIG` | More KataGo overrides (`0` / empty = keep `analysis.cfg`). |
+| `MUXA_ENGINE__SCREEN_VISITS` | Two-pass analysis: screen every move at this many visits, re-search only the swings at `MAX_VISITS` (default `0` = off). |
+| `MUXA_WORKER__CONCURRENCY` | Worker lease loops / advertised slots (games in flight per engine; default `4`). |
 | `MUXA_WORKER__ORCHESTRATOR_URL` | `worker` role: the `ws(s)://…/cluster` URL to dial. |
 | `MUXA_WORKER__AUTH_TOKEN` / `MUXA_ORCHESTRATOR__AUTH_TOKEN` | Shared Bearer secret for `/cluster`. |
 | `MUXA_SENTRY__DSN` | Enable Sentry (see below). |
@@ -167,10 +170,45 @@ Set **`MUXA_SENTRY__DSN`** and the orchestrator reports, in Sentry, all of:
   - `katago_ws.jobs.waiting` — gauge: queue depth.
   - `katago_ws.jobs.processed{outcome}` — counter: throughput.
   - `katago_ws.job.duration{outcome}` — histogram: time per job.
+  - `katago_ws.moves.analyzed` — counter: moves in completed games. **Its rate is
+    the throughput number to watch** (jobs/s isn't: game lengths vary too much).
+  - `katago_ws.positions.analyzed{pass}` — counter: positions KataGo searched, by
+    `pass` (`full`, or `screen`/`refine` with two-pass analysis).
+- **Job traces** — each queue delivery is an `analysis_job` transaction (job id,
+  attempt), with the DB writes, `katago.analyze` (moves, refined turns) and one
+  `katago.pass` span per KataGo query (pass, positions, visits) beneath it. In the
+  `orchestrator` + `worker` split, the engine spans are traced on the worker.
 
 The same metrics/traces/logs also export over **OTLP** if you set
 `MUXA_OTEL__ENDPOINT` to a collector (e.g. `grafana/otel-lgtm`) — useful for
 Grafana/Prometheus dashboards.
+
+## Throughput tuning
+
+KataGo's analysis engine already batches neural-net evaluations across every
+position it is searching, so throughput comes from keeping that batch full and not
+wasting visits:
+
+- **Many positions, few threads each.** A game goes to KataGo as one query covering
+  every turn, so hundreds of positions are always queued. The default overrides
+  (`numAnalysisThreads=32`, `numSearchThreadsPerAnalysisThread=1`, passed as
+  `-override-config`) search 32 positions at once with one thread each, instead of
+  the stock config's 2 × 16, whose threads contend over the same tree. That is the
+  same 32 threads in total, so it is no heavier on any host. On a GPU, raise
+  `ANALYSIS_THREADS` (mid-tier 32–64, strong 64–256) and keep
+  `NN_MAX_BATCH_SIZE` ≥ analysis × search threads ÷ GPUs.
+- **Keep the queue fed.** `WORKER__CONCURRENCY` (default 4) games in flight per
+  engine stops KataGo's queue draining at the tail of a game.
+- **Two-pass analysis** (`ENGINE__SCREEN_VISITS`, off by default). Every turn is
+  screened at `SCREEN_VISITS` (e.g. 16–32); only the turns either side of a move
+  whose screened win rate or score swings by `REFINE_WINRATE_DELTA` (0.03) or
+  `REFINE_SCORE_DELTA` (1.0 point), in either direction, are re-searched at
+  `MAX_VISITS`, ahead of other games in KataGo's queue. Quiet moves keep their
+  shallow result, so their candidates carry fewer visits; the payload records
+  `engine.screen_visits` when this ran. `positions.analyzed{pass}` shows how much
+  is refined.
+
+Compare settings by the rate of `katago_ws.moves.analyzed` on the same set of games.
 
 ## Building images
 

@@ -54,6 +54,21 @@ model = "model.bin.gz"
 # Analysis tuning (max_visits, analysis_pv_len, include_ownership, top_k,
 # default_komi, default_board_size, request_timeout_secs) defaults to the values
 # in `src/config.rs`; override any of them here or via MUXA_ENGINE__* env vars.
+#
+# Throughput (see README "Throughput tuning"). Passed to KataGo as
+# `-override-config`; 0 / empty keeps analysis.cfg's value.
+# analysis_threads = 32               # numAnalysisThreads: positions in parallel
+# search_threads_per_analysis = 1     # numSearchThreadsPerAnalysisThread
+# nn_max_batch_size = 0               # nnMaxBatchSize (per GPU)
+# nn_server_threads = 0               # numNNServerThreadsPerModel (one per GPU)
+# override_config = ""                # extra raw "key=value,key=value"
+#
+# Two-pass analysis: screen every move at screen_visits, re-search at max_visits
+# only the moves whose screened win rate / score swings by a refine delta.
+# 0 (default) = off: one pass at max_visits.
+# screen_visits = 0
+# refine_winrate_delta = 0.03
+# refine_score_delta = 1.0
 
 [ratelimit]
 # Per-IP rate limit on POST /analyse (the only endpoint that queues KataGo work).
@@ -77,8 +92,9 @@ trust_forwarded_for = false
 # WebSocket client dialing the orchestrator (no Postgres); serves /health only.
 
 [worker]
-# Consumer lease loops (standalone/orchestrator) AND the slots a worker advertises.
-concurrency = 2
+# Consumer lease loops (standalone/orchestrator) AND the slots a worker advertises:
+# games in flight per engine. A few keep KataGo's queue from draining.
+concurrency = 4
 # Visibility timeout while a job is in flight (the worker heartbeats to extend
 # it). Below the config.rs default of 600 — the heartbeat re-arms it as needed.
 visibility_timeout_secs = 120
