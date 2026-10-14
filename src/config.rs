@@ -258,7 +258,7 @@ impl Default for WorkerConfig {
 pub struct OrchestratorConfig {
     /// Shared secret a worker must present (Bearer) to open the cluster socket.
     /// Empty disables auth — only safe on a trusted private network; set it
-    /// whenever the socket is publicly reachable (e.g. fronted by Cloudflare).
+    /// whenever the socket is publicly reachable (e.g. behind a public reverse proxy).
     pub auth_token: SecretString,
 }
 

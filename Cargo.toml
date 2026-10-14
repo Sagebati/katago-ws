@@ -28,7 +28,7 @@ sgf-parser = "2"
 # `worker` roles; see `src/cluster/`). The orchestrator serves the socket on its
 # existing axum web server (axum's `ws` feature); a worker dials it with
 # `tokio-tungstenite` (rustls + bundled webpki roots, so `wss://` works behind a
-# TLS terminator like Cloudflare with no system OpenSSL). `rustls` is a direct dep
+# TLS-terminating reverse proxy with no system OpenSSL). `rustls` is a direct dep
 # only to install a process-default crypto provider at worker startup.
 # Pinned to 0.29 to match the version axum 0.8's `ws` feature pulls — otherwise the
 # graph compiles two copies of tungstenite/tokio-tungstenite (a binary-size + build

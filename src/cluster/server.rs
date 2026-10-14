@@ -1,7 +1,7 @@
 //! Orchestrator-side dispatcher — an axum WebSocket handler.
 //!
 //! Mounted on the orchestrator's own web server at `GET /cluster` (so it shares
-//! the HTTP port and a TLS terminator like Cloudflare can front it). Each worker
+//! the HTTP port and a TLS-terminating reverse proxy can front it). Each worker
 //! opens one socket and announces its capacity ([`ClientMsg::Hello`]); the
 //! orchestrator then drives `slots` copies of [`crate::worker::worker_loop`] for
 //! that connection, each leasing one pgmq job and dispatching it to the worker via

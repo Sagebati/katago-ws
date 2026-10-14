@@ -3,7 +3,7 @@
 //! Workers run on hosts that cannot reach Postgres; they only talk to the
 //! orchestrator. The orchestrator owns the DB + pgmq and *proxies* the work over
 //! a WebSocket it serves on its **own web port** (`/cluster`) — so it rides the
-//! same axum server and a TLS terminator (e.g. Cloudflare) can front it with no
+//! same axum server and a TLS-terminating reverse proxy can front it with no
 //! extra port. It reads the queue, pushes each job to a connected worker, and
 //! writes the result back. This module holds the wire messages ([`message`]), the
 //! orchestrator-side dispatcher ([`server`]), and the worker-side client
