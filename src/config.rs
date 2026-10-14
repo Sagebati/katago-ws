@@ -36,13 +36,16 @@ fn default_board_size() -> u8 {
 fn default_timeout() -> u64 {
     600
 }
-/// Positions KataGo searches in parallel. A game is submitted as one query
-/// covering every turn, so there are always hundreds of positions waiting: the
-/// throughput preset (many positions × one thread each) keeps the NN batch full
-/// without threads contending over the same tree. 32 × 1 keeps the stock
-/// config's total of 32 search threads, so it is no heavier on any host.
+/// Positions KataGo searches in parallel: by default, one per hardware thread
+/// this process may use (cgroup CPU limits included). A game is submitted as one
+/// query covering every turn, so there are always hundreds of positions
+/// waiting: the throughput preset (many positions × one thread each) keeps the
+/// NN batch full without threads contending over the same tree. Falls back to
+/// the stock config's 32 if the thread count can't be read.
 fn default_analysis_threads() -> u32 {
-    32
+    std::thread::available_parallelism().map_or(32, |threads| {
+        u32::try_from(threads.get()).unwrap_or(u32::MAX)
+    })
 }
 fn default_search_threads_per_analysis() -> u32 {
     1
@@ -272,10 +275,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_overrides_pick_the_throughput_preset() {
+    fn default_overrides_use_one_position_per_system_thread() {
+        let threads = std::thread::available_parallelism().unwrap().get();
         assert_eq!(
-            EngineConfig::default().katago_overrides().as_deref(),
-            Some("numAnalysisThreads=32,numSearchThreadsPerAnalysisThread=1")
+            EngineConfig::default().katago_overrides(),
+            Some(format!(
+                "numAnalysisThreads={threads},numSearchThreadsPerAnalysisThread=1"
+            ))
         );
     }
 

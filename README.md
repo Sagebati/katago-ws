@@ -146,7 +146,7 @@ production, not the committed file.
 | `MUXA_WEB__HOST` / `MUXA_WEB__PORT` | Bind address (default `0.0.0.0:3000`). |
 | `MUXA_ENGINE__MAX_VISITS` | KataGo visits per move. **Keep modest (8–50)** so a game finishes inside the lease. |
 | `MUXA_ENGINE__BINARY` / `__CONFIG` / `__MODEL` | KataGo paths (the image sets these). |
-| `MUXA_ENGINE__ANALYSIS_THREADS` / `__SEARCH_THREADS_PER_ANALYSIS` | KataGo `numAnalysisThreads` × `numSearchThreadsPerAnalysisThread` (default `32` × `1`: the throughput preset). See [Throughput tuning](#throughput-tuning). |
+| `MUXA_ENGINE__ANALYSIS_THREADS` / `__SEARCH_THREADS_PER_ANALYSIS` | KataGo `numAnalysisThreads` × `numSearchThreadsPerAnalysisThread` (default: system threads × `1`, the throughput preset). See [Throughput tuning](#throughput-tuning). |
 | `MUXA_ENGINE__NN_MAX_BATCH_SIZE` / `__NN_SERVER_THREADS` / `__OVERRIDE_CONFIG` | More KataGo overrides (`0` / empty = keep `analysis.cfg`). |
 | `MUXA_ENGINE__SCREEN_VISITS` | Two-pass analysis: screen every move at this many visits, re-search only the swings at `MAX_VISITS` (default `0` = off). |
 | `MUXA_WORKER__CONCURRENCY` | Worker lease loops / advertised slots (games in flight per engine; default `4`). |
@@ -191,12 +191,13 @@ wasting visits:
 
 - **Many positions, few threads each.** A game goes to KataGo as one query covering
   every turn, so hundreds of positions are always queued. The default overrides
-  (`numAnalysisThreads=32`, `numSearchThreadsPerAnalysisThread=1`, passed as
-  `-override-config`) search 32 positions at once with one thread each, instead of
-  the stock config's 2 × 16, whose threads contend over the same tree. That is the
-  same 32 threads in total, so it is no heavier on any host. On a GPU, raise
-  `ANALYSIS_THREADS` (mid-tier 32–64, strong 64–256) and keep
-  `NN_MAX_BATCH_SIZE` ≥ analysis × search threads ÷ GPUs.
+  (passed as `-override-config`) search one position per hardware thread the
+  process may use (`numAnalysisThreads` = the system's thread count, cgroup limits
+  included) with one thread each (`numSearchThreadsPerAnalysisThread=1`), instead of
+  the stock config's 2 × 16, whose threads contend over the same tree. On a GPU the
+  batch wants more threads than the host has cores: raise `ANALYSIS_THREADS`
+  (mid-tier 32–64, strong 64–256) and keep `NN_MAX_BATCH_SIZE` ≥ analysis × search
+  threads ÷ GPUs.
 - **Keep the queue fed.** `WORKER__CONCURRENCY` (default 4) games in flight per
   engine stops KataGo's queue draining at the tail of a game.
 - **Two-pass analysis** (`ENGINE__SCREEN_VISITS`, off by default). Every turn is

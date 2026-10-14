@@ -57,7 +57,7 @@ model = "model.bin.gz"
 #
 # Throughput (see README "Throughput tuning"). Passed to KataGo as
 # `-override-config`; 0 / empty keeps analysis.cfg's value.
-# analysis_threads = 32               # numAnalysisThreads: positions in parallel
+# analysis_threads = <system threads> # numAnalysisThreads: positions in parallel
 # search_threads_per_analysis = 1     # numSearchThreadsPerAnalysisThread
 # nn_max_batch_size = 0               # nnMaxBatchSize (per GPU)
 # nn_server_threads = 0               # numNNServerThreadsPerModel (one per GPU)
