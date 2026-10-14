@@ -119,8 +119,12 @@ pub async fn worker_loop<E: Executor>(
                     Ok(Some(msg)) => {
                         let msg_id = msg.msg_id;
                         // One trace (a Sentry transaction) per delivery: lease,
-                        // analysis and the result writes as child spans.
+                        // analysis and the result writes as child spans. A root
+                        // span on purpose: under the long-lived `muxa.task` span
+                        // it would be a child of a transaction that only ends at
+                        // shutdown, and never reach Sentry on its own.
                         let span = tracing::info_span!(
+                            parent: None,
                             "analysis_job",
                             job_id = %msg.message.job_id,
                             msg_id,
