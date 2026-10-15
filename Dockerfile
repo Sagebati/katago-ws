@@ -103,7 +103,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ${RUNTIME_PKGS}
 COPY --from=katago /kata/katago           /opt/katago/katago
 COPY --from=katago /kata/model.bin.gz     /opt/katago/model.bin.gz
 COPY --from=katago /kata/analysis.cfg     /opt/katago/analysis.cfg
-COPY katago-ws/muxa.toml             /app/muxa.toml
+COPY katago-ws/config.toml           /app/config.toml
 
 WORKDIR /app
 
@@ -114,12 +114,12 @@ WORKDIR /app
 # rusticl only exposes a driver it has been asked for by name. `none` on the
 # CPU/CUDA images, where there is no rusticl to configure.
 ENV RUSTICL_ENABLE=${RUSTICL_DRIVERS} \
-    MUXA_CONFIG=/app/muxa.toml \
-    MUXA_WEB__HOST=0.0.0.0 \
-    MUXA_WEB__PORT=3000 \
-    MUXA_ENGINE__BINARY=/opt/katago/katago \
-    MUXA_ENGINE__CONFIG=/opt/katago/analysis.cfg \
-    MUXA_ENGINE__MODEL=/opt/katago/model.bin.gz \
+    KATAGO_WS_CONFIG=/app/config.toml \
+    KATAGO_WS_WEB__HOST=0.0.0.0 \
+    KATAGO_WS_WEB__PORT=3000 \
+    KATAGO_WS_ENGINE__BINARY=/opt/katago/katago \
+    KATAGO_WS_ENGINE__CONFIG=/opt/katago/analysis.cfg \
+    KATAGO_WS_ENGINE__MODEL=/opt/katago/model.bin.gz \
     APPIMAGE_EXTRACT_AND_RUN=1 \
     RUST_LOG=info
 

@@ -36,12 +36,12 @@ services:
     image: ${KATAGO_WS_IMAGE:?set KATAGO_WS_IMAGE (build+push the image first)}
     command: orchestrator          # role = first CLI arg, appended to ENTRYPOINT
     environment:
-      MUXA_DIESEL__URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/katago
+      KATAGO_WS_DIESEL__URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/katago
       # Shared secret a worker must present (Bearer) to open the /cluster socket.
-      MUXA_ORCHESTRATOR__AUTH_TOKEN: ${CLUSTER_TOKEN:?set CLUSTER_TOKEN (shared worker secret)}
+      KATAGO_WS_ORCHESTRATOR__AUTH_TOKEN: ${CLUSTER_TOKEN:?set CLUSTER_TOKEN (shared worker secret)}
       # Consumer/dispatch knobs (apply to the orchestrator's lease loops):
-      MUXA_WORKER__VISIBILITY_TIMEOUT_SECS: "120"
-      MUXA_WORKER__MAX_ATTEMPTS: "3"
+      KATAGO_WS_WORKER__VISIBILITY_TIMEOUT_SECS: "120"
+      KATAGO_WS_WORKER__MAX_ATTEMPTS: "3"
       RUST_LOG: info
     ports:
       # Public HTTP API AND the `/cluster` worker WebSocket share this one port.
