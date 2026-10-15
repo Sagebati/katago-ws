@@ -30,6 +30,7 @@ present (at the `MUXA_REF` in `.github/sibling-refs.env`).
 cargo run                      # standalone: web + in-process workers
 cargo run -- orchestrator      # web + pgmq + cluster dispatcher, no engine
 cargo run -- worker            # KataGo + cluster client, no Postgres
+cargo run --release -- bench   # KataGo only: throughput benchmark, then exit
 
 cargo build                    # CI/Docker use `cargo build --release --locked`
 cargo clippy                   # lints are enforced — see Conventions
@@ -63,7 +64,7 @@ validate muxa changes by building/testing through this crate.
 
 ## Architecture
 
-### Launch roles (one binary, three modes)
+### Launch roles (one binary, four modes)
 
 The role is the **first CLI argument** (or the `KATAGO_WS_ROLE` env var), *not*
 config — see `Role::resolve` in [`src/main.rs`](src/main.rs):
@@ -74,6 +75,8 @@ config — see `Role::resolve` in [`src/main.rs`](src/main.rs):
   Owns the DB and proxies work to remote workers.
 - **`worker`** — runs KataGo and dials the orchestrator; **no Postgres**. Serves
   only `/health`.
+- **`bench`** — KataGo only (no Postgres, no web): analyzes an SGF directory at
+  a fixed concurrency and writes a JSON report ([`src/bench.rs`](src/bench.rs)).
 
 `orchestrator` + N `worker`s scale the API and the engine independently when
 workers can't reach Postgres. The pgmq lease always stays on the orchestrator, so a
@@ -146,6 +149,22 @@ own sub-router so the layer applies to it alone.
 -config <cfg> -model <model>` as a long-lived subprocess and shares it as
 `Arc<AnalysisEngine>`. `analyze` = parse SGF (`engine/sgf.rs`) → drive KataGo over
 JSON (`engine/katago.rs`) → annotate moves (`engine/annotate.rs`).
+
+### Benchmarking the worker
+
+`scripts/bench_setup.sh` fills the gitignored `bench/` (KataGo release binary,
+models, an OGS game corpus). `just bench LABEL [katagoKey=value …] [env.MUXA_X=…]`
+runs one benchmark against a derived KataGo config (`just bench-quick` = 6 games,
+~1 min, for fast A/B; `just bench-prod` = ~300 games, ~45 min, for final numbers;
+`just bench-models` = one run per model in `bench/models/`); `scripts/bench_compare.py
+BASE.json RUN.json…` tabulates throughput and the per-move evaluation drift vs a
+base run (benchmark the base twice to see the MCTS noise floor). The worker is
+GPU-bound: the Rust side is ~0% CPU, so throughput comes from KataGo's settings —
+positions in parallel (`[engine] analysis_threads`, 1 search thread each),
+`nn_server_threads` × `nn_max_batch_size`, and the OpenCL device/driver. Stock
+KataGo's OpenCL backend shares one in-order command queue across NN server
+threads, which caps one process well below the GPU's capacity;
+[`patches/`](patches/) has a per-thread-queue fix (upstream: lightvector/KataGo#1267).
 
 ### ⚠️ "gRPC" naming is stale — the transport is WebSocket
 

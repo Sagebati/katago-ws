@@ -28,6 +28,16 @@ services:
       # Workers do the heavy lifting — tune analysis strength per host's CPU/GPU.
       MUXA_ENGINE__MAX_VISITS: "100"
       MUXA_ENGINE__REQUEST_TIMEOUT_SECS: "600"
+      # GPU throughput. The defaults (numAnalysisThreads = CPU cores, KataGo's
+      # stock batching) suit a CPU worker; on a GPU, many positions with 1 search
+      # thread each batch far better. Measured on an RX 6800 XT (b20, 100 visits)
+      # this is ~4x the stock config with one engine. With the stock OpenCL build
+      # a small net (b10) leaves the GPU ~half idle in one process, so
+      # `--scale worker=2` is worth ~+25%; with the patch in patches/, one engine
+      # with 8 server threads x batch 32 is faster still. Measure with `just bench`.
+      # MUXA_ENGINE__ANALYSIS_THREADS: "256"
+      # MUXA_ENGINE__NN_SERVER_THREADS: "4"
+      # MUXA_ENGINE__NN_MAX_BATCH_SIZE: "64"
       # APPIMAGE_EXTRACT_AND_RUN=1 is baked into the image (the bundled KataGo is
       # an AppImage and the slim runtime has no FUSE), so no need to set it here.
       RUST_LOG: info

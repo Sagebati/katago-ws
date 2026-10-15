@@ -15,10 +15,14 @@
 //! - `worker` — runs KataGo and dials the orchestrator's cluster WebSocket; has
 //!   **no** Postgres access. Serves only `/health` (for liveness/readiness probes).
 //!
+//! - `bench` — KataGo only: analyzes a directory of SGFs at a fixed concurrency
+//!   and writes a throughput report (see [`bench`]). No Postgres, no web server.
+//!
 //! `orchestrator` + N `worker`s let the two tiers scale independently when the
 //! workers can't reach Postgres directly (the queue lease still lives on the
 //! orchestrator, so a worker crash is redelivered exactly as a local crash is).
 
+mod bench;
 mod cluster;
 mod config;
 mod db;
@@ -53,6 +57,8 @@ enum Role {
     Orchestrator,
     /// Engine + cluster WebSocket client; no Postgres.
     Worker,
+    /// Engine only: throughput benchmark over an SGF corpus, then exit.
+    Bench,
 }
 
 impl Role {
@@ -68,8 +74,9 @@ impl Role {
             None | Some("standalone") => Ok(Self::Standalone),
             Some("orchestrator") => Ok(Self::Orchestrator),
             Some("worker") => Ok(Self::Worker),
+            Some("bench") => Ok(Self::Bench),
             Some(other) => Err(format!(
-                "unknown role {other:?}; expected one of: standalone, orchestrator, worker"
+                "unknown role {other:?}; expected one of: standalone, orchestrator, worker, bench"
             )),
         }
     }
@@ -83,6 +90,7 @@ async fn main() -> muxa::Result<()> {
         Role::Standalone => run_standalone().await,
         Role::Orchestrator => run_orchestrator().await,
         Role::Worker => run_worker().await,
+        Role::Bench => run_bench().await,
     }
 }
 
@@ -185,6 +193,16 @@ async fn run_worker() -> muxa::Result<()> {
         .await?
         .run()
         .await
+}
+
+/// `bench`: launch KataGo, run the throughput benchmark, exit. No telemetry
+/// export, DB, or web server — only the engine is under test.
+async fn run_bench() -> muxa::Result<()> {
+    let app = App::default().with_plugin(KataGoEnginePlugin).await?;
+    let engine = Arc::clone(Selector::<Arc<AnalysisEngine>, _>::select(app.state()));
+    let engine_cfg = extract::<config::EngineConfig>(&app, "engine");
+    let bench_cfg = extract::<bench::BenchConfig>(&app, "bench");
+    bench::run(engine, &engine_cfg, bench_cfg).await.map_err(Error::other)
 }
 
 /// Finish + serve the aide API (shared by `standalone` and `orchestrator`). `ApiPlugin`

@@ -3,7 +3,7 @@
 //! own their sections.
 
 use secrecy::SecretString;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 fn default_binary() -> String {
     "katago".to_owned()
@@ -58,7 +58,7 @@ fn default_refine_score_delta() -> f32 {
 }
 
 /// `[engine]` — how to launch and drive the KataGo analysis engine.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct EngineConfig {
     /// Path to (or name of) the `katago` binary.

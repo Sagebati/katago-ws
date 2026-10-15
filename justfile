@@ -44,6 +44,30 @@ default:
 test *ARGS:
     cargo nextest run {{ARGS}}
 
+# Benchmark the KataGo worker: one labelled run of the `bench` role (17 games).
+# One-time setup: scripts/bench_setup.sh (KataGo, models, SGF corpus → bench/).
+# Args are KataGo config overrides or env.MUXA_*=… — see scripts/bench.sh, e.g.
+#   just bench t256 numAnalysisThreads=256 numSearchThreadsPerAnalysisThread=1
+# Compare runs: scripts/bench_compare.py bench/results/BASE.json bench/results/*.json
+bench LABEL *ARGS:
+    cargo build --release
+    scripts/bench.sh {{LABEL}} {{ARGS}}
+
+# Quick bench: 6 games, ~1 min — for fast A/B checks (compare quick with quick).
+bench-quick LABEL *ARGS:
+    cargo build --release
+    BENCH_PRESET=quick scripts/bench.sh {{LABEL}} {{ARGS}}
+
+# Production bench: the ~300-game corpus, ~45 min — sustained, final numbers.
+bench-prod LABEL *ARGS:
+    cargo build --release
+    BENCH_PRESET=prod scripts/bench.sh {{LABEL}} {{ARGS}}
+
+# Bench every model in bench/models/ with the same args (BENCH_PRESET applies).
+bench-models PREFIX *ARGS:
+    cargo build --release
+    scripts/bench_models.sh {{PREFIX}} {{ARGS}}
+
 # CPU (Eigen) — pure Debian, no GPU.
 cpu:
     DOCKER_BUILDKIT=1 docker build -f Dockerfile -t {{image}}:cpu \
