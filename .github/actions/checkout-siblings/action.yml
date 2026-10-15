@@ -14,17 +14,21 @@ runs:
       # comment syntax, so sibling-refs.env's leading `#` lines (and any blank
       # lines) must be stripped before appending, or the runner rejects the
       # whole file with "Invalid format".
-      run: grep -v '^\s*#' "${{ github.action_path }}/../../sibling-refs.env" | grep -v '^\s*$' >> "$GITHUB_ENV"
+      # $GITHUB_ACTION_PATH, not ${{ github.action_path }}: inside a job
+      # `container:` the expression still yields the host path
+      # (/home/runner/work/...), while the env var is mapped to the
+      # container's (/__w/...).
+      run: grep -v '^\s*#' "$GITHUB_ACTION_PATH/../../sibling-refs.env" | grep -v '^\s*$' >> "$GITHUB_ENV"
 
     - name: Checkout muxa (sibling build-context crate, pinned)
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         repository: ${{ env.MUXA_REPO }}
         ref: ${{ env.MUXA_REF }}
         path: muxa
 
     - name: Checkout pgmq fork (sibling build-context crate, pinned)
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         repository: ${{ env.PGMQ_REPO }}
         ref: ${{ env.PGMQ_REF }}
