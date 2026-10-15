@@ -202,7 +202,9 @@ async fn run_bench() -> muxa::Result<()> {
     let engine = Arc::clone(Selector::<Arc<AnalysisEngine>, _>::select(app.state()));
     let engine_cfg = extract::<config::EngineConfig>(&app, "engine");
     let bench_cfg = extract::<bench::BenchConfig>(&app, "bench");
-    bench::run(engine, &engine_cfg, bench_cfg).await.map_err(Error::other)
+    bench::run(engine, &engine_cfg, bench_cfg)
+        .await
+        .map_err(Error::other)
 }
 
 /// Finish + serve the aide API (shared by `standalone` and `orchestrator`). `ApiPlugin`
