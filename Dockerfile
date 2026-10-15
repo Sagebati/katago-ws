@@ -16,10 +16,14 @@
 ARG RUNTIME_BASE=debian:bookworm-slim
 ARG KATAGO_VERSION=v1.16.5
 ARG KATAGO_ZIP=katago-v1.16.5-eigen-linux-x64.zip
-# KataGo's mainstream modern network (b18c384nbt, kata1 run) — the one KataGo's own
-# test scripts pin. Far stronger per visit than the 2020 g170 b20c256x2 it
-# replaces, at roughly the same cost per NN evaluation.
-ARG MODEL_URL=https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b18c384nbt-s9996604416-d4316597426.bin.gz
+# Default net: g170e b10c128, chosen for throughput. Measured with `just
+# bench-models` on an RX 6800 XT at 100 visits, positions/s with one engine:
+# b10c128 72-85, g170e b20c256x2 26, kata1 b40c256 14, kata1 b18c384nbt 6.4.
+# The cost is accuracy: mean win-rate deviation from a strong reference
+# (b18c384nbt at 1000 visits) is 6.8% for b10 vs 3.2% for b20 and ~1% for b18.
+# For stronger analysis pass a different MODEL_URL, e.g. kata1 b18c384nbt:
+#   https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b18c384nbt-s9996604416-d4316597426.bin.gz
+ARG MODEL_URL=https://katagoarchive.org/g170/neuralnets/g170e-b10c128-s1141046784-d204142634.bin.gz
 ARG CONFIG_URL=https://raw.githubusercontent.com/lightvector/KataGo/${KATAGO_VERSION}/cpp/configs/analysis_example.cfg
 ARG RUNTIME_PKGS=ca-certificates
 
