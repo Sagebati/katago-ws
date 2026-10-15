@@ -13,11 +13,11 @@
 //!   **no** engine. It owns the DB and proxies work to remote workers over the
 //!   cluster socket.
 //! - `worker` — runs KataGo and dials the orchestrator's cluster WebSocket; has
-//!   **no** Postgres access. Serves only `/health` (for liveness/readiness probes).
+//!   **no** Postgres access. Serves only `/healthz` (for liveness/readiness probes).
 //!
 //! - `bench` — KataGo only: analyzes a directory of SGFs at a fixed concurrency
 //!   and writes a throughput report (see [`bench`]). No Postgres, no web server.
-//! - `healthcheck` — probes this instance's own `GET /health` on `[web].port` and
+//! - `healthcheck` — probes this instance's own `GET /healthz` on `[web].port` and
 //!   exits 0 or 1; the images' Docker `HEALTHCHECK` (see [`healthcheck`]).
 //!
 //! `orchestrator` + N `worker`s let the two tiers scale independently when the
@@ -62,7 +62,7 @@ enum Role {
     Worker,
     /// Engine only: throughput benchmark over an SGF corpus, then exit.
     Bench,
-    /// Probe this instance's `GET /health`, then exit (Docker `HEALTHCHECK`).
+    /// Probe this instance's `GET /healthz`, then exit (Docker `HEALTHCHECK`).
     Healthcheck,
 }
 
@@ -93,7 +93,7 @@ async fn main() -> muxa::Result<()> {
     let role = Role::resolve().map_err(Error::other)?;
     // The probe runs every few seconds; keep it quiet and dependency-free.
     if role == Role::Healthcheck {
-        return run_healthcheck();
+        return run_healthcheck().await;
     }
     tracing::info!(?role, "starting katago-ws");
     match role {
@@ -101,7 +101,7 @@ async fn main() -> muxa::Result<()> {
         Role::Orchestrator => run_orchestrator().await,
         Role::Worker => run_worker().await,
         Role::Bench => run_bench().await,
-        Role::Healthcheck => run_healthcheck(),
+        Role::Healthcheck => run_healthcheck().await,
     }
 }
 
@@ -184,7 +184,7 @@ async fn run_orchestrator() -> muxa::Result<()> {
 }
 
 /// `worker`: KataGo engine + cluster WebSocket client dialing the orchestrator; no
-/// Postgres. Serves only `/health` so `App::run` has a serve loop and probes have a target.
+/// Postgres. Serves only `/healthz` so `App::run` has a serve loop and probes have a target.
 async fn run_worker() -> muxa::Result<()> {
     let app = muxa::app!()
         .with_plugin(SentryPlugin)
@@ -218,15 +218,15 @@ async fn run_bench() -> muxa::Result<()> {
         .map_err(Error::other)
 }
 
-/// `healthcheck`: `GET /health` on this instance's `[web].port` (the same config
+/// `healthcheck`: `GET /healthz` on this instance's `[web].port` (the same config
 /// and env vars the serving roles read), for the images' Docker `HEALTHCHECK`.
 /// Builds no plugins, so it starts and exits in milliseconds.
-fn run_healthcheck() -> muxa::Result<()> {
+async fn run_healthcheck() -> muxa::Result<()> {
     let port = muxa::app!()
         .figment()
         .extract_inner::<u16>("web.port")
         .unwrap_or(DEFAULT_WEB_PORT);
-    healthcheck::probe(port).map_err(Error::other)
+    healthcheck::probe(port).await.map_err(Error::other)
 }
 
 /// muxa-web's default `[web].port`, for a config that doesn't set one.
@@ -252,7 +252,7 @@ fn extract<T: serde::de::DeserializeOwned + Default>(app: &AppBuilder<impl State
     app.figment().extract_inner(key).unwrap_or_default()
 }
 
-/// Minimal routes for the `worker` role: just a liveness/readiness `/health`.
+/// Minimal routes for the `worker` role: just a liveness/readiness `/healthz`.
 fn health_routes<S>(_state: &S) -> axum::Router {
-    axum::Router::new().route("/health", axum::routing::get(|| async { "ok" }))
+    axum::Router::new().route("/healthz", axum::routing::get(|| async { "ok" }))
 }
