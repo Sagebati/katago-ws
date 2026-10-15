@@ -40,14 +40,14 @@ pub struct ApiState {
 /// `ApiPlugin` finishes this into the axum router + the OpenAPI document and
 /// serves `/openapi.json` + `/docs`, so this only declares routes. The JSON
 /// endpoints use `api_route` (so they appear in the spec); `/` (HTML landing
-/// page), `/analyses/stream` (SSE) and `/health` are plain routes — HTML and
+/// page), `/analyses/stream` (SSE) and `/healthz` are plain routes — HTML and
 /// streaming responses aren't expressible as a JSON schema, so they're served
 /// but not documented.
 ///
 /// `POST /analyse` is the only expensive endpoint (it queues KataGo work), so
 /// it's the only one rate-limited — by client IP, via the muxa-web layer. It
 /// lives in its own sub-router so the layer applies to it alone; reads, the SSE
-/// stream, and `/health` stay unthrottled.
+/// stream, and `/healthz` stay unthrottled.
 pub fn api_router(state: ApiState, rl: &RateLimitConfig) -> Result<ApiRouter> {
     let mut submit = ApiRouter::new().api_route(
         "/analyse",
@@ -96,7 +96,7 @@ pub fn api_router(state: ApiState, rl: &RateLimitConfig) -> Result<ApiRouter> {
         )
         .route("/", get(handlers::index))
         .route("/analyses/stream", get(handlers::stream))
-        .route("/health", get(|| async { "ok" }));
+        .route("/healthz", get(|| async { "ok" }));
 
     // Orchestrator role only: the worker control-plane WebSocket. Its auth (a
     // shared Bearer token) is enforced inside the handler. Not an `api_route` — a

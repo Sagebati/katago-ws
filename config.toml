@@ -90,7 +90,7 @@ trust_forwarded_for = false
 # orchestrator|worker]`, default `standalone`. `standalone` = web + in-process
 # workers (one process). `orchestrator` = web + pgmq + the cluster WebSocket
 # dispatcher (served at `/cluster` on the web port; no engine). `worker` = KataGo +
-# WebSocket client dialing the orchestrator (no Postgres); serves /health only.
+# WebSocket client dialing the orchestrator (no Postgres); serves /healthz only.
 
 [worker]
 # Consumer lease loops (standalone/orchestrator) AND the slots a worker advertises:

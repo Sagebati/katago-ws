@@ -74,9 +74,13 @@ config — see `Role::resolve` in [`src/main.rs`](src/main.rs):
 - **`orchestrator`** — web API + pgmq + the cluster dispatcher; **no engine**.
   Owns the DB and proxies work to remote workers.
 - **`worker`** — runs KataGo and dials the orchestrator; **no Postgres**. Serves
-  only `/health`.
+  only `/healthz`.
 - **`bench`** — KataGo only (no Postgres, no web): analyzes an SGF directory at
   a fixed concurrency and writes a JSON report ([`src/bench.rs`](src/bench.rs)).
+
+`katago-ws healthcheck` is a probe, not a role: it requests this instance's own
+`GET /healthz` on `[web].port` and exits 0/1. The images' Docker `HEALTHCHECK`
+runs it, so they need no curl/wget ([`src/healthcheck.rs`](src/healthcheck.rs)).
 
 `orchestrator` + N `worker`s scale the API and the engine independently when
 workers can't reach Postgres. The pgmq lease always stays on the orchestrator, so a
@@ -137,7 +141,7 @@ cross-job realtime.
 
 [`src/http/`](src/http/mod.rs) declares an aide `ApiRouter`; muxa's `ApiPlugin`
 finishes it into the axum router + OpenAPI doc and serves `/docs` + `/openapi.json`.
-JSON endpoints use `api_route` (documented); `/`, `/analyses/stream`, `/health`, and
+JSON endpoints use `api_route` (documented); `/`, `/analyses/stream`, `/healthz`, and
 `/cluster` are plain routes (HTML/SSE/WS aren't expressible as JSON schema). aide
 types come through the `muxa::aide` re-export — never add a direct `aide` dep.
 `POST /analyse` is the only rate-limited endpoint (per-IP, muxa-web layer), in its

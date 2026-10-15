@@ -238,7 +238,7 @@ const INDEX_FOOT: &str = concat!(
     "<section class=\"links\">",
     "<a href=\"/docs\">/docs</a><a href=\"/openapi.json\">/openapi.json</a>",
     "<a href=\"/analyses\">/analyses</a><a href=\"/analyses/stream\">/analyses/stream</a>",
-    "<a href=\"/health\">/health</a></section>",
+    "<a href=\"/healthz\">/healthz</a></section>",
     "<p class=\"muted\">Submit a game (raw SGF in the request body):</p>",
     "<pre>curl -X POST --data-binary @game.sgf https://&lt;host&gt;/analyse</pre>",
     "</body></html>",

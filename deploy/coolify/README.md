@@ -45,7 +45,7 @@ against this same DB), so migrations are a no-op on first connect.
 3. Assign your **domain** (e.g. `orchestrator.abbaye.xyz`, DNS A-record → VPS IP) to
    the `orchestrator` service on port **3000**. Coolify issues the Let's Encrypt
    cert automatically; Traefik proxies WebSockets as-is.
-4. Deploy. Check `https://<domain>/health` → `ok`, and `https://<domain>/` shows the
+4. Deploy. Check `https://<domain>/healthz` → `ok`, and `https://<domain>/` shows the
    dashboard (Workers: 0).
 
 ## 4. Run a worker (anywhere)
