@@ -4,3 +4,6 @@
 .junie/
 # Editor swap files
 *.kate-swp
+
+# Local benchmark workspace (KataGo binary, models, SGF corpus, results)
+/bench/

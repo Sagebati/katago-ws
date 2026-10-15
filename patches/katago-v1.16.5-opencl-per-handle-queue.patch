@@ -1,0 +1,50 @@
+KataGo v1.16.5 OpenCL backend: one command queue per NN server thread.
+
+Upstream shares the device's single in-order command queue across every NN
+server thread in a process, which serializes their batches and blocking reads
+and leaves the GPU partly idle. Each ComputeHandle already owns its weights,
+scratch, buffers and kernel objects, so a queue per handle on the shared
+context needs no extra synchronization. Numerics are unchanged (identical
+`katago testgpuerror` statistics).
+
+Measured with katago-ws `bench` (RX 6800 XT, ROCm OpenCL, 100 visits,
+256 analysis threads x1, 17 games; 4 server threads at batch 64, 8 at batch 32):
+  b10c128: 75.7 -> 147.1 pos/s (4 server threads), 168.4 with 8 (x2.2)
+  b20c256: 26.3 ->  33.5 pos/s (4 server threads),  35.3 with 8 (x1.34)
+
+Apply: cd KataGo && git checkout v1.16.5 && git apply <this file>
+       (lines above the first "diff --git" are ignored by git apply)
+
+diff --git a/cpp/neuralnet/openclbackend.cpp b/cpp/neuralnet/openclbackend.cpp
+index dc6aea0..5824302 100644
+--- a/cpp/neuralnet/openclbackend.cpp
++++ b/cpp/neuralnet/openclbackend.cpp
+@@ -548,7 +548,18 @@ struct ComputeHandleInternal {
+ 
+     const InitializedDevice* device = computeContext->devicesContext->findGpuExn(gpuIdx);
+     clContext = device->context;
+-    commandQueue = device->commandQueue;
++    // Per-handle command queue. Upstream shares the device's single in-order
++    // queue across every NN server thread, which serializes all their batches
++    // (and their blocking reads) and leaves the GPU idle between them. Each
++    // handle already owns its weights, scratch, buffers and kernel objects, so a
++    // queue of its own on the shared context needs no further synchronization.
++    {
++      cl_int queueErr;
++      cl_command_queue_properties queueProps =
++        ComputeContext::liveProfilingKernels ? CL_QUEUE_PROFILING_ENABLE : 0;
++      commandQueue = clCreateCommandQueue(clContext, device->info.deviceId, queueProps, &queueErr);
++      CHECK_ERR(queueErr);
++    }
+     CompiledPrograms* progs = computeContext->compiledProgramsByDeviceId[device->info.deviceId];
+     testAssert(progs != NULL);
+     tuneParams = progs->tuneParams;
+@@ -635,6 +646,8 @@ struct ComputeHandleInternal {
+       if(profileEvents[i] != NULL)
+         clReleaseEvent(profileEvents[i]);
+     }
++    clFinish(commandQueue);
++    clReleaseCommandQueue(commandQueue);
+   }
+ 
+   ComputeHandleInternal() = delete;
