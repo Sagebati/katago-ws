@@ -97,7 +97,7 @@ async fn main() -> muxa::Result<()> {
 /// `standalone`: the original single-process deployment — web API and in-process
 /// workers sharing one Postgres/pgmq.
 async fn run_standalone() -> muxa::Result<()> {
-    let app = App::default()
+    let app = muxa::app!()
         .with_plugin(SentryPlugin)
         .await?
         .with_plugin(OtelPlugin)
@@ -135,7 +135,7 @@ async fn run_standalone() -> muxa::Result<()> {
 /// `orchestrator`: web API + pgmq + the cluster WebSocket dispatcher; no engine.
 /// Owns the DB and proxies work to remote workers.
 async fn run_orchestrator() -> muxa::Result<()> {
-    let app = App::default()
+    let app = muxa::app!()
         .with_plugin(SentryPlugin)
         .await?
         .with_plugin(OtelPlugin)
@@ -175,7 +175,7 @@ async fn run_orchestrator() -> muxa::Result<()> {
 /// `worker`: KataGo engine + cluster WebSocket client dialing the orchestrator; no
 /// Postgres. Serves only `/health` so `App::run` has a serve loop and probes have a target.
 async fn run_worker() -> muxa::Result<()> {
-    let app = App::default()
+    let app = muxa::app!()
         .with_plugin(SentryPlugin)
         .await?
         .with_plugin(OtelPlugin)
@@ -198,7 +198,7 @@ async fn run_worker() -> muxa::Result<()> {
 /// `bench`: launch KataGo, run the throughput benchmark, exit. No telemetry
 /// export, DB, or web server — only the engine is under test.
 async fn run_bench() -> muxa::Result<()> {
-    let app = App::default().with_plugin(KataGoEnginePlugin).await?;
+    let app = muxa::app!().with_plugin(KataGoEnginePlugin).await?;
     let engine = Arc::clone(Selector::<Arc<AnalysisEngine>, _>::select(app.state()));
     let engine_cfg = extract::<config::EngineConfig>(&app, "engine");
     let bench_cfg = extract::<bench::BenchConfig>(&app, "bench");

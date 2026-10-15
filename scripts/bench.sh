@@ -2,13 +2,13 @@
 # One benchmark run of the KataGo worker: derive a KataGo config from a base
 # file plus KEY=VALUE overrides, then run `katago-ws bench` against it.
 #
-#   scripts/bench.sh LABEL [cfg.key=value ...] [env.MUXA_X=value ...]
+#   scripts/bench.sh LABEL [cfg.key=value ...] [env.KATAGO_WS_X=value ...]
 #
 #   scripts/bench.sh threads32x1 numAnalysisThreads=32 numSearchThreadsPerAnalysisThread=1
-#   scripts/bench.sh conc4 env.MUXA_BENCH__CONCURRENCY=4
+#   scripts/bench.sh conc4 env.KATAGO_WS_BENCH__CONCURRENCY=4
 #
 # Bare KEY=VALUE pairs override lines of the KataGo config (uncommenting them if
-# needed); `env.` pairs are exported for the run (MUXA_ENGINE__*, MUXA_BENCH__*).
+# needed); `env.` pairs are exported for the run (KATAGO_WS_ENGINE__*, KATAGO_WS_BENCH__*).
 # Report → bench/results/LABEL.json, derived config → bench/cfg/LABEL.cfg.
 #
 # Corpus presets (BENCH_PRESET), all at the same engine settings:
@@ -62,18 +62,18 @@ for kv in "$@"; do
 done
 
 env RUST_LOG="${RUST_LOG:-info}" \
-  MUXA_ENGINE__BINARY="${BENCH_KATAGO:-bench/katago-dist/katago}" \
-  MUXA_ENGINE__CONFIG="$cfg" \
-  MUXA_ENGINE__MODEL="${BENCH_MODEL:-bench/models/g170e-b10c128.bin.gz}" \
-  MUXA_ENGINE__MAX_VISITS="${BENCH_MAX_VISITS:-100}" \
-  MUXA_ENGINE__ANALYSIS_THREADS=0 \
-  MUXA_ENGINE__SEARCH_THREADS_PER_ANALYSIS=0 \
-  MUXA_ENGINE__NN_MAX_BATCH_SIZE=0 \
-  MUXA_ENGINE__NN_SERVER_THREADS=0 \
-  MUXA_ENGINE__SCREEN_VISITS=0 \
-  MUXA_BENCH__CORPUS="$corpus" \
-  MUXA_BENCH__CONCURRENCY="${BENCH_CONCURRENCY:-2}" \
-  MUXA_BENCH__LABEL="$label" \
-  MUXA_BENCH__OUT="bench/results/$label.json" \
+  KATAGO_WS_ENGINE__BINARY="${BENCH_KATAGO:-bench/katago-dist/katago}" \
+  KATAGO_WS_ENGINE__CONFIG="$cfg" \
+  KATAGO_WS_ENGINE__MODEL="${BENCH_MODEL:-bench/models/g170e-b10c128.bin.gz}" \
+  KATAGO_WS_ENGINE__MAX_VISITS="${BENCH_MAX_VISITS:-100}" \
+  KATAGO_WS_ENGINE__ANALYSIS_THREADS=0 \
+  KATAGO_WS_ENGINE__SEARCH_THREADS_PER_ANALYSIS=0 \
+  KATAGO_WS_ENGINE__NN_MAX_BATCH_SIZE=0 \
+  KATAGO_WS_ENGINE__NN_SERVER_THREADS=0 \
+  KATAGO_WS_ENGINE__SCREEN_VISITS=0 \
+  KATAGO_WS_BENCH__CORPUS="$corpus" \
+  KATAGO_WS_BENCH__CONCURRENCY="${BENCH_CONCURRENCY:-2}" \
+  KATAGO_WS_BENCH__LABEL="$label" \
+  KATAGO_WS_BENCH__OUT="bench/results/$label.json" \
   "${envs[@]}" \
   ./target/release/katago-ws bench 2>&1 | grep -E "bench:|ERROR|WARN" || true

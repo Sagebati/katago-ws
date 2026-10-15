@@ -46,7 +46,7 @@ test *ARGS:
 
 # Benchmark the KataGo worker: one labelled run of the `bench` role (17 games).
 # One-time setup: scripts/bench_setup.sh (KataGo, models, SGF corpus → bench/).
-# Args are KataGo config overrides or env.MUXA_*=… — see scripts/bench.sh, e.g.
+# Args are KataGo config overrides or env.KATAGO_WS_*=… — see scripts/bench.sh, e.g.
 #   just bench t256 numAnalysisThreads=256 numSearchThreadsPerAnalysisThread=1
 # Compare runs: scripts/bench_compare.py bench/results/BASE.json bench/results/*.json
 bench LABEL *ARGS:

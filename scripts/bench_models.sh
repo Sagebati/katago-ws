@@ -2,7 +2,7 @@
 # Benchmark every model in bench/models/ under the same KataGo config, then
 # tabulate throughput and quality side by side.
 #
-#   scripts/bench_models.sh [PREFIX] [cfg.key=value ...] [env.MUXA_X=value ...]
+#   scripts/bench_models.sh [PREFIX] [cfg.key=value ...] [env.KATAGO_WS_X=value ...]
 #
 #   scripts/bench_models.sh m numAnalysisThreads=256 numSearchThreadsPerAnalysisThread=1
 #   MODELS="g170e-b10c128 kata1-b18c384nbt" scripts/bench_models.sh m ...

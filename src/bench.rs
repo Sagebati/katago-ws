@@ -11,9 +11,9 @@
 //! fingerprints is how a tuning change is checked for having bought speed with
 //! analysis quality; see `scripts/bench_compare.py`.
 //!
-//! Configured from `[bench]` (or `MUXA_BENCH__*`); the engine itself from
+//! Configured from `[bench]` (or `KATAGO_WS_BENCH__*`); the engine itself from
 //! `[engine]` exactly as in the other roles, so a KataGo config under test is
-//! selected with `MUXA_ENGINE__CONFIG`.
+//! selected with `KATAGO_WS_ENGINE__CONFIG`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

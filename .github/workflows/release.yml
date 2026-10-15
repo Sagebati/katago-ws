@@ -127,7 +127,7 @@ jobs:
 
       # context is the workspace root (not katago-ws/) — same convention as
       # image.yml — because the Dockerfile's runtime-base stage does
-      # `COPY katago-ws/muxa.toml ...` relative to that root. The build-binary
+      # `COPY katago-ws/config.toml ...` relative to that root. The build-binary
       # stage (which needs the sibling muxa/pgmq checkouts) is never evaluated
       # for the runtime-prebuilt target, so those siblings aren't needed here.
       - name: Build + push ${{ matrix.variant }} image

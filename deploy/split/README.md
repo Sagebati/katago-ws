@@ -68,8 +68,8 @@ lease lapses and another worker picks it up.
 
 The cluster WebSocket lives at `/cluster` on the orchestrator's web port
 (`:3000`) and is authenticated by a **shared Bearer token**: `CLUSTER_TOKEN` sets
-the orchestrator's `MUXA_ORCHESTRATOR__AUTH_TOKEN`, and each worker presents the
-same value as `MUXA_WORKER__AUTH_TOKEN`. A connection without the right token is
+the orchestrator's `KATAGO_WS_ORCHESTRATOR__AUTH_TOKEN`, and each worker presents the
+same value as `KATAGO_WS_WORKER__AUTH_TOKEN`. A connection without the right token is
 rejected with `401` before it can register. **Always set a strong `CLUSTER_TOKEN`**
 — if it's empty, auth is disabled and anyone who can reach `/cluster` can register
 as a worker, receive submitted SGFs, and write arbitrary "results" to your DB.
@@ -79,7 +79,7 @@ the SGFs travel unencrypted. So:
 
 - **Use TLS for any untrusted path.** Front `:3000` with a TLS-terminating reverse
   proxy (Caddy/nginx/a load balancer) and have workers dial `wss://<host>/cluster`
-  (`MUXA_WORKER__ORCHESTRATOR_URL`). One cert then protects both the public HTTP
+  (`KATAGO_WS_WORKER__ORCHESTRATOR_URL`). One cert then protects both the public HTTP
   API and the cluster socket. Rate-limiting on `POST /analyse` is built in (per-IP,
   in-memory).
 - **Or keep workers on a private network** — a cloud VPC, or a WireGuard/Tailscale
@@ -90,7 +90,7 @@ the SGFs travel unencrypted. So:
 
 ## Notes
 
-- **Postgres**: lives with the orchestrator here; swap `MUXA_DIESEL__URL` for a
+- **Postgres**: lives with the orchestrator here; swap `KATAGO_WS_DIESEL__URL` for a
   managed DB (Neon/RDS/…) if you prefer. Workers still never connect to it.
 - **Migrations** run on the orchestrator at startup (workers have no DB).
 - **HA**: you can run multiple orchestrators against one DB behind a load

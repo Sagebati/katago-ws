@@ -153,7 +153,7 @@ JSON (`engine/katago.rs`) → annotate moves (`engine/annotate.rs`).
 ### Benchmarking the worker
 
 `scripts/bench_setup.sh` fills the gitignored `bench/` (KataGo release binary,
-models, an OGS game corpus). `just bench LABEL [katagoKey=value …] [env.MUXA_X=…]`
+models, an OGS game corpus). `just bench LABEL [katagoKey=value …] [env.KATAGO_WS_X=…]`
 runs one benchmark against a derived KataGo config (`just bench-quick` = 6 games,
 ~1 min, for fast A/B; `just bench-prod` = ~300 games, ~45 min, for final numbers;
 `just bench-models` = one run per model in `bench/models/`); `scripts/bench_compare.py
@@ -177,9 +177,9 @@ port 50051 — that wording is stale. The truth:
   no separate listen port. A worker dials `ws(s)://…/cluster` (`tokio-tungstenite`).
 - Wire messages are JSON frames (`src/cluster/message.rs`): worker sends `Hello`
   (name + slots) then `Result`s; orchestrator pushes `JobRequest`s.
-- Real config keys: `MUXA_WORKER__ORCHESTRATOR_URL` (the `ws(s)://…/cluster` URL),
-  `MUXA_WORKER__AUTH_TOKEN`, and `MUXA_ORCHESTRATOR__AUTH_TOKEN` (shared Bearer
-  secret). **There is no `MUXA_ORCHESTRATOR__GRPC_LISTEN` and no port 50051** —
+- Real config keys: `KATAGO_WS_WORKER__ORCHESTRATOR_URL` (the `ws(s)://…/cluster` URL),
+  `KATAGO_WS_WORKER__AUTH_TOKEN`, and `KATAGO_WS_ORCHESTRATOR__AUTH_TOKEN` (shared Bearer
+  secret). **There is no `KATAGO_WS_ORCHESTRATOR__GRPC_LISTEN` and no port 50051** —
   ignore any such reference if you encounter one.
 
 When writing new code or docs, describe this as WebSocket; don't propagate the
@@ -226,11 +226,13 @@ in YAML. Change the KataGo version in exactly one place: the justfile.
 
 ## Conventions
 
-- **Config**: muxa loads `muxa.toml` via figment, merged with `MUXA_*` env vars
-  (`__` = table nesting, e.g. `MUXA_ENGINE__MAX_VISITS`, `MUXA_DIESEL__URL`).
+- **Config**: `muxa::app!()` names the config after this crate: `config.toml` (or
+  `$KATAGO_WS_CONFIG`) merged with `KATAGO_WS_*` env vars (`__` = table nesting, e.g.
+  `KATAGO_WS_ENGINE__MAX_VISITS`, `KATAGO_WS_DIESEL__URL`, `KATAGO_WS_ENV`). One prefix
+  covers every section; there is no `KATAGO_WS_*` and no `muxa.toml` any more.
   muxa's plugins own `[web]/[otel]/[sentry]/[diesel]`; this crate owns
   `[engine]/[worker]/[orchestrator]/[ratelimit]` (see [`src/config.rs`](src/config.rs)).
-  Secrets come from the environment in production, not the committed `muxa.toml`.
+  Secrets come from the environment in production, not the committed `config.toml`.
 - **Lints are enforced** (`[lints.clippy]` in [`Cargo.toml`](Cargo.toml), a curated
   `restriction` subset). Notably: `unwrap_used`, `print_stdout`/`print_stderr`
   (use `tracing`, not stdout/stderr), `dbg_macro`, `todo`, `unimplemented`,
