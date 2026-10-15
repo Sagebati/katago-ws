@@ -65,7 +65,7 @@ redelivered exactly like a local one.
 | `GET /analyses/stream` | Server-Sent Events: a snapshot then a live tail of job changes. |
 | `GET /` | Plain-HTML status dashboard (workers, running, queue). |
 | `GET /workers` | Connected cluster workers (orchestrator). |
-| `GET /health` | Liveness/readiness probe. |
+| `GET /healthz` | Liveness/readiness probe. |
 | `GET /docs`, `GET /openapi.json` | Swagger UI + OpenAPI document (aide). |
 | `GET /cluster` | Worker↔orchestrator WebSocket (not for clients). |
 

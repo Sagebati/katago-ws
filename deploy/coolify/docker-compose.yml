@@ -41,9 +41,6 @@ services:
       RUST_LOG: info
     expose:
       - "3000"
-    healthcheck:
-      # Busybox/glibc image has no curl; use the orchestrator's own /health via
-      # a tiny TCP check would need a tool — instead let Coolify health-check the
-      # HTTP domain. This block is a no-op placeholder you can enable if you add
-      # a probe tool to the image.
-      disable: true
+    # Health: the image's own HEALTHCHECK (`katago-ws healthcheck` → GET /healthz)
+    # applies. Don't add a `healthcheck:` block with `disable: true` here — it
+    # would switch the image's check off.

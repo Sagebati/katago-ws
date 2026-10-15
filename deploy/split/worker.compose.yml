@@ -42,6 +42,6 @@ services:
       # an AppImage and the slim runtime has no FUSE), so no need to set it here.
       RUST_LOG: info
     restart: unless-stopped
-    # No published ports — the worker dials OUT. It serves /health on 3000
+    # No published ports — the worker dials OUT. It serves /healthz on 3000
     # internally; uncomment to expose a liveness probe:
     # ports: ["3000:3000"]
