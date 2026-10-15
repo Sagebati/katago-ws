@@ -101,18 +101,18 @@ argument; the engine binary + model are baked in):
 ```bash
 # CPU (Eigen) build — runs anywhere, no GPU:
 docker run --rm \
-  -e MUXA_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
-  -e MUXA_ENGINE__MAX_VISITS=20 \
+  -e KATAGO_WS_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
+  -e KATAGO_WS_ENGINE__MAX_VISITS=20 \
   ghcr.io/sagebati/katago-ws:latest worker
 
 # NVIDIA GPU — add `--gpus all` and use the :cuda tag:
 docker run --rm --gpus all \
-  -e MUXA_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
+  -e KATAGO_WS_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
   ghcr.io/sagebati/katago-ws:cuda worker
 
 # AMD/Intel GPU via OpenCL — pass the render device and use the :opencl tag:
 docker run --rm --device /dev/dri \
-  -e MUXA_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
+  -e KATAGO_WS_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
   ghcr.io/sagebati/katago-ws:opencl worker
 ```
 
@@ -123,8 +123,8 @@ newer. NVIDIA cards should use the `:cuda` tag rather than OpenCL.
 
 `ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster` is the deployed orchestrator (it's
 the `[worker].orchestrator_url` default, so a worker dials it even without the env
-var); point `MUXA_WORKER__ORCHESTRATOR_URL` elsewhere to use your own. The
-orchestrator runs without auth, so no `MUXA_WORKER__AUTH_TOKEN` is needed — set one
+var); point `KATAGO_WS_WORKER__ORCHESTRATOR_URL` elsewhere to use your own. The
+orchestrator runs without auth, so no `KATAGO_WS_WORKER__AUTH_TOKEN` is needed — set one
 (matching `[orchestrator].auth_token`) only if you enable it, and front it with TLS
 first, since plain `ws://` would send the token in cleartext.
 
@@ -135,34 +135,36 @@ cargo clippy         # lints are enforced
 
 ## Configuration
 
-muxa loads [`muxa.toml`](muxa.toml) via figment, merged with `MUXA_*` environment
-variables (`__` = table nesting). Secrets should come from the environment in
+[`config.toml`](config.toml) (or the file `$KATAGO_WS_CONFIG` points at) is merged
+with `KATAGO_WS_*` environment variables (`__` = table nesting), the environment
+winning. Every section uses that one prefix, framework ones (`[web]`, `[diesel]`,
+`[sentry]`, `[otel]`) included. Secrets should come from the environment in
 production, not the committed file.
 
 | Key env var | Meaning |
 |---|---|
-| `MUXA_ENV` | Run mode: `development` / `production` (default: from build profile). Drives Sentry env + sample rates. |
-| `MUXA_DIESEL__URL` | Postgres URL (use Supabase's **session** pooler, port 5432, in prod). |
-| `MUXA_WEB__HOST` / `MUXA_WEB__PORT` | Bind address (default `0.0.0.0:3000`). |
-| `MUXA_ENGINE__MAX_VISITS` | KataGo visits per move. **Keep modest (8–50)** so a game finishes inside the lease. |
-| `MUXA_ENGINE__BINARY` / `__CONFIG` / `__MODEL` | KataGo paths (the image sets these). |
-| `MUXA_ENGINE__ANALYSIS_THREADS` / `__SEARCH_THREADS_PER_ANALYSIS` | KataGo `numAnalysisThreads` × `numSearchThreadsPerAnalysisThread` (default: system threads × `1`, the throughput preset). See [Throughput tuning](#throughput-tuning). |
-| `MUXA_ENGINE__NN_MAX_BATCH_SIZE` / `__NN_SERVER_THREADS` / `__OVERRIDE_CONFIG` | More KataGo overrides (`0` / empty = keep `analysis.cfg`). |
-| `MUXA_ENGINE__SCREEN_VISITS` | Two-pass analysis: screen every move at this many visits, re-search only the swings at `MAX_VISITS` (default `0` = off). |
-| `MUXA_WORKER__CONCURRENCY` | Worker lease loops / advertised slots (games in flight per engine; default `4`). |
-| `MUXA_WORKER__ORCHESTRATOR_URL` | `worker` role: the `ws(s)://…/cluster` URL to dial. |
-| `MUXA_WORKER__AUTH_TOKEN` / `MUXA_ORCHESTRATOR__AUTH_TOKEN` | Shared Bearer secret for `/cluster`. |
-| `MUXA_SENTRY__DSN` | Enable Sentry (see below). |
-| `MUXA_OTEL__ENDPOINT` | OTLP/gRPC collector endpoint (unset ⇒ OTEL export off). |
+| `KATAGO_WS_ENV` | Run mode: `development` / `production` (default: from build profile). Drives Sentry env + sample rates. |
+| `KATAGO_WS_DIESEL__URL` | Postgres URL (use Supabase's **session** pooler, port 5432, in prod). |
+| `KATAGO_WS_WEB__HOST` / `KATAGO_WS_WEB__PORT` | Bind address (default `0.0.0.0:3000`). |
+| `KATAGO_WS_ENGINE__MAX_VISITS` | KataGo visits per move. **Keep modest (8–50)** so a game finishes inside the lease. |
+| `KATAGO_WS_ENGINE__BINARY` / `__CONFIG` / `__MODEL` | KataGo paths (the image sets these). |
+| `KATAGO_WS_ENGINE__ANALYSIS_THREADS` / `__SEARCH_THREADS_PER_ANALYSIS` | KataGo `numAnalysisThreads` × `numSearchThreadsPerAnalysisThread` (default: system threads × `1`, the throughput preset). See [Throughput tuning](#throughput-tuning). |
+| `KATAGO_WS_ENGINE__NN_MAX_BATCH_SIZE` / `__NN_SERVER_THREADS` / `__OVERRIDE_CONFIG` | More KataGo overrides (`0` / empty = keep `analysis.cfg`). |
+| `KATAGO_WS_ENGINE__SCREEN_VISITS` | Two-pass analysis: screen every move at this many visits, re-search only the swings at `MAX_VISITS` (default `0` = off). |
+| `KATAGO_WS_WORKER__CONCURRENCY` | Worker lease loops / advertised slots (games in flight per engine; default `4`). |
+| `KATAGO_WS_WORKER__ORCHESTRATOR_URL` | `worker` role: the `ws(s)://…/cluster` URL to dial. |
+| `KATAGO_WS_WORKER__AUTH_TOKEN` / `KATAGO_WS_ORCHESTRATOR__AUTH_TOKEN` | Shared Bearer secret for `/cluster`. |
+| `KATAGO_WS_SENTRY__DSN` | Enable Sentry (see below). |
+| `KATAGO_WS_OTEL__ENDPOINT` | OTLP/gRPC collector endpoint (unset ⇒ OTEL export off). |
 
 ## Observability
 
-Set **`MUXA_SENTRY__DSN`** and the orchestrator reports, in Sentry, all of:
+Set **`KATAGO_WS_SENTRY__DSN`** and the orchestrator reports, in Sentry, all of:
 
 - **Issues** — panics and `error!` events.
 - **Logs** — INFO/WARN/ERROR lines stream to the Logs explorer.
 - **Traces + DB spans** — one transaction per HTTP request, diesel queries as child
-  spans (sampled at `MUXA_SENTRY__TRACES_SAMPLE_RATE`; defaults to 0.1 in prod, 1.0
+  spans (sampled at `KATAGO_WS_SENTRY__TRACES_SAMPLE_RATE`; defaults to 0.1 in prod, 1.0
   in dev).
 - **Custom metrics** — dual-emitted (OTEL + Sentry SDK, since Sentry doesn't ingest
   OTLP metrics):
@@ -180,7 +182,7 @@ Set **`MUXA_SENTRY__DSN`** and the orchestrator reports, in Sentry, all of:
   `orchestrator` + `worker` split, the engine spans are traced on the worker.
 
 The same metrics/traces/logs also export over **OTLP** if you set
-`MUXA_OTEL__ENDPOINT` to a collector (e.g. `grafana/otel-lgtm`) — useful for
+`KATAGO_WS_OTEL__ENDPOINT` to a collector (e.g. `grafana/otel-lgtm`) — useful for
 Grafana/Prometheus dashboards.
 
 ## Throughput tuning
@@ -254,20 +256,20 @@ automated deploy.
 
 # CPU (Eigen) — any host, no GPU:
 docker run --rm \
-  -e MUXA_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
-  -e MUXA_ENGINE__MAX_VISITS=20 \
+  -e KATAGO_WS_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
+  -e KATAGO_WS_ENGINE__MAX_VISITS=20 \
   ghcr.io/sagebati/katago-ws:latest worker
 
 # NVIDIA GPU (CUDA) — add `--gpus all` (needs the NVIDIA Container Toolkit):
 docker run --rm --gpus all \
-  -e MUXA_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
-  -e MUXA_ENGINE__MAX_VISITS=20 \
+  -e KATAGO_WS_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
+  -e KATAGO_WS_ENGINE__MAX_VISITS=20 \
   ghcr.io/sagebati/katago-ws:cuda worker
 
 # AMD/Intel GPU (OpenCL) — pass the render node `/dev/dri`:
 docker run --rm --device /dev/dri \
-  -e MUXA_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
-  -e MUXA_ENGINE__MAX_VISITS=20 \
+  -e KATAGO_WS_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
+  -e KATAGO_WS_ENGINE__MAX_VISITS=20 \
   ghcr.io/sagebati/katago-ws:opencl worker
 ```
 
@@ -278,9 +280,9 @@ elsewhere, e.g. Supabase); **workers dial in** over `wss://` and do the heavy
 KataGo work. See [`deploy/coolify/`](deploy/coolify/) for a Coolify + Supabase
 setup, including the Sentry and TLS notes.
 
-> ⚠️ The `/cluster` socket is public when no `MUXA_ORCHESTRATOR__AUTH_TOKEN` is set —
+> ⚠️ The `/cluster` socket is public when no `KATAGO_WS_ORCHESTRATOR__AUTH_TOKEN` is set —
 > any stranger could register as a worker. Set the token (and the matching
-> `MUXA_WORKER__AUTH_TOKEN`) whenever the orchestrator is internet-reachable.
+> `KATAGO_WS_WORKER__AUTH_TOKEN`) whenever the orchestrator is internet-reachable.
 
 ## Project layout
 

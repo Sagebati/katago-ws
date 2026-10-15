@@ -28,7 +28,7 @@ services:
       # silently change what this builds.
       target: runtime
     environment:
-      MUXA_DIESEL__URL: postgres://postgres:postgres@db:5432/goban
+      KATAGO_WS_DIESEL__URL: postgres://postgres:postgres@db:5432/goban
       RUST_LOG: info
       # KataGo's official binary is an AppImage, which self-mounts via FUSE.
       # The slim runtime container has no FUSE (/dev/fuse, fusermount), so the
@@ -38,12 +38,12 @@ services:
       APPIMAGE_EXTRACT_AND_RUN: "1"
       # Tune analysis strength/cost. Lowered to 10 so a full ~325-move game
       # completes within the 600s engine timeout on this CPU build (100 visits
-      # times out). Raise (and bump MUXA_ENGINE__REQUEST_TIMEOUT_SECS) for
+      # times out). Raise (and bump KATAGO_WS_ENGINE__REQUEST_TIMEOUT_SECS) for
       # stronger analysis.
-      MUXA_ENGINE__MAX_VISITS: "10"
-      # MUXA_WORKER__CONCURRENCY: "2"
+      KATAGO_WS_ENGINE__MAX_VISITS: "10"
+      # KATAGO_WS_WORKER__CONCURRENCY: "2"
       # Error tracking (optional):
-      # MUXA_SENTRY__DSN: "https://...@sentry.io/..."
+      # KATAGO_WS_SENTRY__DSN: "https://...@sentry.io/..."
     ports:
       - "3000:3000"
     depends_on:
@@ -65,10 +65,10 @@ services:
   #     target: runtime
   #   command: orchestrator            # role (appended to the ENTRYPOINT)
   #   environment:
-  #     MUXA_DIESEL__URL: postgres://postgres:postgres@db:5432/goban
+  #     KATAGO_WS_DIESEL__URL: postgres://postgres:postgres@db:5432/goban
   #     # The cluster socket is served at /cluster on the web port (3000) — no extra
   #     # port. Auth is disabled here (private compose network); set
-  #     # MUXA_ORCHESTRATOR__AUTH_TOKEN (+ the worker's MUXA_WORKER__AUTH_TOKEN) to
+  #     # KATAGO_WS_ORCHESTRATOR__AUTH_TOKEN (+ the worker's KATAGO_WS_WORKER__AUTH_TOKEN) to
   #     # require a shared Bearer secret.
   #     RUST_LOG: info
   #   ports:
@@ -85,11 +85,11 @@ services:
   #     target: runtime
   #   command: worker
   #   environment:
-  #     # No MUXA_DIESEL__URL — workers never reach Postgres; they only dial the
+  #     # No KATAGO_WS_DIESEL__URL — workers never reach Postgres; they only dial the
   #     # orchestrator's /cluster WebSocket (service name resolves on the compose network).
-  #     MUXA_WORKER__ORCHESTRATOR_URL: "ws://orchestrator:3000/cluster"
+  #     KATAGO_WS_WORKER__ORCHESTRATOR_URL: "ws://orchestrator:3000/cluster"
   #     APPIMAGE_EXTRACT_AND_RUN: "1"  # see the `app` service note
-  #     MUXA_ENGINE__MAX_VISITS: "10"
+  #     KATAGO_WS_ENGINE__MAX_VISITS: "10"
   #     RUST_LOG: info
   #   depends_on:
   #     - orchestrator

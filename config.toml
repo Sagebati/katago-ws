@@ -1,14 +1,15 @@
 # katago-ws configuration.
 #
-# Loaded by muxa via figment: this file is merged with `MUXA_*` environment
-# variables (`__` = table nesting), e.g. MUXA_DIESEL__URL, MUXA_ENGINE__MODEL_PATH.
+# Loaded at startup (`muxa::app!()` names it after the crate): this file, or the
+# one $KATAGO_WS_CONFIG points at, merged with `KATAGO_WS_*` environment
+# variables (`__` = table nesting), e.g. KATAGO_WS_DIESEL__URL, KATAGO_WS_ENGINE__MODEL.
 # Secrets (diesel.url, sentry.dsn) should come from the environment in
 # production rather than being committed here.
 
 # Run mode (muxa core): "development" or "production". Drives env-aware defaults
 # like the Sentry environment + trace sample rate. Left unset here, so muxa
 # deduces it from the build profile — a debug build (local dev) ⇒ development, a
-# release build (the container) ⇒ production. Override with MUXA_ENV.
+# release build (the container) ⇒ production. Override with KATAGO_WS_ENV.
 # env = "development"
 
 [web]
@@ -19,7 +20,7 @@ port = 3000
 service_name = "katago-ws"
 # OTLP/gRPC collector endpoint. Unset → export disabled (local dev needs no
 # collector). Point it at your collector to ship traces/metrics/logs, e.g.
-# MUXA_OTEL__ENDPOINT="http://otel-collector:4317".
+# KATAGO_WS_OTEL__ENDPOINT="http://otel-collector:4317".
 # endpoint = "http://localhost:4317"
 timeout_secs = 10
 metric_interval_secs = 60
@@ -30,13 +31,13 @@ dsn = ""
 # environment + traces_sample_rate are intentionally unset: muxa derives both
 # from the run mode (see `env` above). development → environment "development",
 # sample rate 1.0; production → "production", 0.1. Override either via
-# MUXA_SENTRY__ENVIRONMENT / MUXA_SENTRY__TRACES_SAMPLE_RATE.
+# KATAGO_WS_SENTRY__ENVIRONMENT / KATAGO_WS_SENTRY__TRACES_SAMPLE_RATE.
 # logs: INFO/WARN/ERROR tracing events are also shipped to Sentry's Logs product
 # (on by default once a DSN is set). Set logs = false to disable.
 # logs = true
 
 [diesel]
-# Override with MUXA_DIESEL__URL in deployment.
+# Override with KATAGO_WS_DIESEL__URL in deployment.
 url = "postgres://postgres:postgres@localhost:5432/goban"
 max_connections = 10
 
@@ -46,14 +47,14 @@ max_connections = 10
 [engine]
 # KataGo analysis engine. The service launches `katago analysis -config <config>
 # -model <model>` as a long-lived subprocess and drives it over JSON. These are
-# the local-dev paths (the container overrides them via MUXA_ENGINE__BINARY /
-# MUXA_ENGINE__CONFIG / MUXA_ENGINE__MODEL).
+# the local-dev paths (the container overrides them via KATAGO_WS_ENGINE__BINARY /
+# KATAGO_WS_ENGINE__CONFIG / KATAGO_WS_ENGINE__MODEL).
 binary = "katago"
 config = "analysis.cfg"
 model = "model.bin.gz"
 # Analysis tuning (max_visits, analysis_pv_len, include_ownership, top_k,
 # default_komi, default_board_size, request_timeout_secs) defaults to the values
-# in `src/config.rs`; override any of them here or via MUXA_ENGINE__* env vars.
+# in `src/config.rs`; override any of them here or via KATAGO_WS_ENGINE__* env vars.
 #
 # Throughput (see README "Throughput tuning"). Passed to KataGo as
 # `-override-config`; 0 / empty keeps analysis.cfg's value.
@@ -101,7 +102,7 @@ visibility_timeout_secs = 120
 # poll_secs and max_attempts default per src/config.rs.
 # `worker` role only — the orchestrator's cluster WebSocket URL to dial, the secret
 # it presents (must equal the orchestrator's auth_token), and the reconnect backoff.
-# Override via MUXA_WORKER__ORCHESTRATOR_URL / MUXA_WORKER__AUTH_TOKEN.
+# Override via KATAGO_WS_WORKER__ORCHESTRATOR_URL / KATAGO_WS_WORKER__AUTH_TOKEN.
 orchestrator_url = "ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster"
 auth_token = ""
 reconnect_backoff_secs = 3
@@ -110,5 +111,5 @@ reconnect_backoff_secs = 3
 # `orchestrator` role only — shared secret a worker must present (Bearer) to open
 # the cluster WebSocket (served at `/cluster` on the web port). Empty = auth
 # disabled (only safe on a trusted private network). ALWAYS set it (as a secret,
-# via MUXA_ORCHESTRATOR__AUTH_TOKEN) when the socket is publicly reachable.
+# via KATAGO_WS_ORCHESTRATOR__AUTH_TOKEN) when the socket is publicly reachable.
 auth_token = ""

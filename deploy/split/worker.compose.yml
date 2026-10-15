@@ -9,7 +9,7 @@
 #   docker compose -f worker.compose.yml up -d --scale worker=4
 #
 # `--scale worker=N` runs N engines on this host; or just run this file on more
-# machines. Each worker advertises MUXA_WORKER__CONCURRENCY slots.
+# machines. Each worker advertises KATAGO_WS_WORKER__CONCURRENCY slots.
 name: katago-ws-worker
 
 services:
@@ -19,15 +19,15 @@ services:
     environment:
       # The orchestrator's `/cluster` WebSocket on its web port (:3000). Must be
       # reachable from here; nothing else (no DB). Use wss:// if it's behind TLS.
-      MUXA_WORKER__ORCHESTRATOR_URL: "ws://${ORCHESTRATOR_HOST:?set ORCHESTRATOR_HOST}:3000/cluster"
+      KATAGO_WS_WORKER__ORCHESTRATOR_URL: "ws://${ORCHESTRATOR_HOST:?set ORCHESTRATOR_HOST}:3000/cluster"
       # Shared secret presented as a Bearer token — must equal the orchestrator's.
-      MUXA_WORKER__AUTH_TOKEN: ${CLUSTER_TOKEN:?set CLUSTER_TOKEN (same secret as the orchestrator)}
+      KATAGO_WS_WORKER__AUTH_TOKEN: ${CLUSTER_TOKEN:?set CLUSTER_TOKEN (same secret as the orchestrator)}
       # Concurrent analyses this worker accepts (slots advertised to the orchestrator).
-      MUXA_WORKER__CONCURRENCY: "2"
-      MUXA_WORKER__RECONNECT_BACKOFF_SECS: "3"
+      KATAGO_WS_WORKER__CONCURRENCY: "2"
+      KATAGO_WS_WORKER__RECONNECT_BACKOFF_SECS: "3"
       # Workers do the heavy lifting — tune analysis strength per host's CPU/GPU.
-      MUXA_ENGINE__MAX_VISITS: "100"
-      MUXA_ENGINE__REQUEST_TIMEOUT_SECS: "600"
+      KATAGO_WS_ENGINE__MAX_VISITS: "100"
+      KATAGO_WS_ENGINE__REQUEST_TIMEOUT_SECS: "600"
       # APPIMAGE_EXTRACT_AND_RUN=1 is baked into the image (the bundled KataGo is
       # an AppImage and the slim runtime has no FUSE), so no need to set it here.
       RUST_LOG: info

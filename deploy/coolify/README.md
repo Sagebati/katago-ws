@@ -40,8 +40,8 @@ against this same DB), so migrations are a no-op on first connect.
 1. **New Resource → Docker Compose**, point it at this `deploy/coolify/docker-compose.yml`
    (or paste it).
 2. Set environment variables as **secrets**:
-   - `MUXA_DIESEL__URL` = the Supabase session-pooler URL from step 2.
-   - `MUXA_ORCHESTRATOR__AUTH_TOKEN` = a long random string (see §5).
+   - `KATAGO_WS_DIESEL__URL` = the Supabase session-pooler URL from step 2.
+   - `KATAGO_WS_ORCHESTRATOR__AUTH_TOKEN` = a long random string (see §5).
 3. Assign your **domain** (e.g. `orchestrator.abbaye.xyz`, DNS A-record → VPS IP) to
    the `orchestrator` service on port **3000**. Coolify issues the Let's Encrypt
    cert automatically; Traefik proxies WebSockets as-is.
@@ -50,23 +50,23 @@ against this same DB), so migrations are a no-op on first connect.
 
 ## 4. Run a worker (anywhere)
 ```sh
-MUXA_WORKER__ORCHESTRATOR_URL=wss://orchestrator.abbaye.xyz/cluster \
-MUXA_WORKER__AUTH_TOKEN=<same token as the orchestrator> \
-MUXA_ENGINE__MAX_VISITS=20 \
-docker run --rm -e MUXA_WORKER__ORCHESTRATOR_URL -e MUXA_WORKER__AUTH_TOKEN \
-  -e MUXA_ENGINE__MAX_VISITS ghcr.io/sagebati/katago-ws:latest worker
+KATAGO_WS_WORKER__ORCHESTRATOR_URL=wss://orchestrator.abbaye.xyz/cluster \
+KATAGO_WS_WORKER__AUTH_TOKEN=<same token as the orchestrator> \
+KATAGO_WS_ENGINE__MAX_VISITS=20 \
+docker run --rm -e KATAGO_WS_WORKER__ORCHESTRATOR_URL -e KATAGO_WS_WORKER__AUTH_TOKEN \
+  -e KATAGO_WS_ENGINE__MAX_VISITS ghcr.io/sagebati/katago-ws:latest worker
 ```
 The dashboard's **Workers** count goes 0 → 1. Submit a game:
 `curl -X POST --data-binary @game.sgf https://orchestrator.abbaye.xyz/analyse`.
 
-> Keep `MUXA_ENGINE__MAX_VISITS` modest (8–50) so a full game finishes inside the
+> Keep `KATAGO_WS_ENGINE__MAX_VISITS` modest (8–50) so a full game finishes inside the
 > orchestrator's lease window — high visits are what made earlier jobs time out.
 
 ## 5. ⚠️ Auth — this socket is public
 `wss://orchestrator.abbaye.xyz/cluster` is reachable by anyone. With an empty token,
 **any stranger can register as a worker** (receive your SGFs, return junk results).
-Set `MUXA_ORCHESTRATOR__AUTH_TOKEN` and give workers the matching
-`MUXA_WORKER__AUTH_TOKEN`. For an open pool, move to per-worker tokens later so a
+Set `KATAGO_WS_ORCHESTRATOR__AUTH_TOKEN` and give workers the matching
+`KATAGO_WS_WORKER__AUTH_TOKEN`. For an open pool, move to per-worker tokens later so a
 bad worker can be revoked without rotating everyone's.
 
 ## 6. Sentry (error tracking, optional)
@@ -76,16 +76,16 @@ no DSN it runs a no-op client (nothing is sent), so this step is optional.
 1. In Sentry: **Create project → Platform: Rust**. Copy its **DSN**
    (`https://<key>@<org>.ingest.sentry.io/<project>`).
 2. In Coolify → this resource → **Environment Variables**, add a **secret**:
-   - `MUXA_SENTRY__DSN` = the DSN from step 1. That's the only required one.
+   - `KATAGO_WS_SENTRY__DSN` = the DSN from step 1. That's the only required one.
 3. **Redeploy**. On boot the logs show `muxa-sentry: initialized` (vs. `no DSN set,
    running as no-op client`). Panics, errors, and request transactions land in Sentry.
 
-The compose sets `MUXA_ENV=production` (muxa's core run mode), so Sentry's
+The compose sets `KATAGO_WS_ENV=production` (muxa's core run mode), so Sentry's
 **environment** defaults to `production` and the **transaction sample rate to
 0.1** (10%) — performance monitoring is on, sampled to bound cost/quota. Locally
 (debug build ⇒ `development`) both default the other way: environment
 `development`, rate **1.0** (every trace). Override per-knob with
-`MUXA_SENTRY__ENVIRONMENT` / `MUXA_SENTRY__TRACES_SAMPLE_RATE` (`1.0` = trace
+`KATAGO_WS_SENTRY__ENVIRONMENT` / `KATAGO_WS_SENTRY__TRACES_SAMPLE_RATE` (`1.0` = trace
 everything, `0.0` = errors only).
 
 What lands in Sentry once the DSN is set:
@@ -94,14 +94,14 @@ What lands in Sentry once the DSN is set:
   above); diesel queries show as child spans. The dashboard (`GET /`) and the
   `/analyses` + `/analyse/{id}` endpoints all hit Postgres, so they populate the
   Performance + DB views. To actually see them, bump
-  `MUXA_SENTRY__TRACES_SAMPLE_RATE=1.0` while testing. *(Note: the background
+  `KATAGO_WS_SENTRY__TRACES_SAMPLE_RATE=1.0` while testing. *(Note: the background
   analysis pipeline runs outside HTTP, so its queries aren't traced yet.)*
 - **Logs** — INFO/WARN/ERROR log lines stream to the Logs explorer (muxa enables
-  `enable_logs`; set `MUXA_SENTRY__LOGS=false` to turn off).
+  `enable_logs`; set `KATAGO_WS_SENTRY__LOGS=false` to turn off).
 
 The DSN is a `SecretString`: it's redacted from `Debug`/logs, so it won't leak into
-the dashboard or traces. Workers can take the same `MUXA_SENTRY__DSN` to report
-their own KataGo-side errors; tag them apart with `MUXA_SENTRY__ENVIRONMENT`.
+the dashboard or traces. Workers can take the same `KATAGO_WS_SENTRY__DSN` to report
+their own KataGo-side errors; tag them apart with `KATAGO_WS_SENTRY__ENVIRONMENT`.
 
 ## 7. Auto-deploy (optional)
 Add the repo secret `COOLIFY_DEPLOY_HOOK` (your Coolify resource's deploy webhook
