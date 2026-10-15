@@ -78,6 +78,10 @@ config — see `Role::resolve` in [`src/main.rs`](src/main.rs):
 - **`bench`** — KataGo only (no Postgres, no web): analyzes an SGF directory at
   a fixed concurrency and writes a JSON report ([`src/bench.rs`](src/bench.rs)).
 
+`katago-ws healthcheck` is a probe, not a role: it requests this instance's own
+`GET /health` on `[web].port` and exits 0/1. The images' Docker `HEALTHCHECK`
+runs it, so they need no curl/wget ([`src/healthcheck.rs`](src/healthcheck.rs)).
+
 `orchestrator` + N `worker`s scale the API and the engine independently when
 workers can't reach Postgres. The pgmq lease always stays on the orchestrator, so a
 remote worker crash is redelivered exactly like a local one.

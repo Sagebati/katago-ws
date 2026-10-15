@@ -129,7 +129,15 @@ ENV RUSTICL_ENABLE=${RUSTICL_DRIVERS} \
 
 EXPOSE 3000
 
-# No in-image HEALTHCHECK tool; probe GET /health from your orchestrator/LB.
+# The binary probes its own GET /health on [web].port (`katago-ws healthcheck`),
+# so the image needs no curl/wget. Every role that serves HTTP answers /health.
+# The long start period covers a worker's first start, which launches KataGo
+# (model load, and on a new GPU OpenCL kernel tuning) before /health comes up;
+# failures inside it don't count, and the first success marks it healthy.
+# Inherited by both leaf stages below.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=600s --retries=3 \
+    CMD ["katago-ws", "healthcheck"]
+
 # USER is deliberately NOT set here — it comes last in each leaf stage below,
 # after that stage's binary COPY, so every COPY in this Dockerfile still runs
 # as root (matching the pre-split behavior) and only the final image runs

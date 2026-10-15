@@ -17,6 +17,8 @@
 //!
 //! - `bench` — KataGo only: analyzes a directory of SGFs at a fixed concurrency
 //!   and writes a throughput report (see [`bench`]). No Postgres, no web server.
+//! - `healthcheck` — probes this instance's own `GET /health` on `[web].port` and
+//!   exits 0 or 1; the images' Docker `HEALTHCHECK` (see [`healthcheck`]).
 //!
 //! `orchestrator` + N `worker`s let the two tiers scale independently when the
 //! workers can't reach Postgres directly (the queue lease still lives on the
@@ -28,6 +30,7 @@ mod config;
 mod db;
 mod engine;
 mod error;
+mod healthcheck;
 mod http;
 mod metrics;
 mod queue;
@@ -59,6 +62,8 @@ enum Role {
     Worker,
     /// Engine only: throughput benchmark over an SGF corpus, then exit.
     Bench,
+    /// Probe this instance's `GET /health`, then exit (Docker `HEALTHCHECK`).
+    Healthcheck,
 }
 
 impl Role {
@@ -75,8 +80,9 @@ impl Role {
             Some("orchestrator") => Ok(Self::Orchestrator),
             Some("worker") => Ok(Self::Worker),
             Some("bench") => Ok(Self::Bench),
+            Some("healthcheck") => Ok(Self::Healthcheck),
             Some(other) => Err(format!(
-                "unknown role {other:?}; expected one of: standalone, orchestrator, worker, bench"
+                "unknown role {other:?}; expected one of: standalone, orchestrator, worker, bench, healthcheck"
             )),
         }
     }
@@ -85,12 +91,17 @@ impl Role {
 #[tokio::main]
 async fn main() -> muxa::Result<()> {
     let role = Role::resolve().map_err(Error::other)?;
+    // The probe runs every few seconds; keep it quiet and dependency-free.
+    if role == Role::Healthcheck {
+        return run_healthcheck();
+    }
     tracing::info!(?role, "starting katago-ws");
     match role {
         Role::Standalone => run_standalone().await,
         Role::Orchestrator => run_orchestrator().await,
         Role::Worker => run_worker().await,
         Role::Bench => run_bench().await,
+        Role::Healthcheck => run_healthcheck(),
     }
 }
 
@@ -206,6 +217,20 @@ async fn run_bench() -> muxa::Result<()> {
         .await
         .map_err(Error::other)
 }
+
+/// `healthcheck`: `GET /health` on this instance's `[web].port` (the same config
+/// and env vars the serving roles read), for the images' Docker `HEALTHCHECK`.
+/// Builds no plugins, so it starts and exits in milliseconds.
+fn run_healthcheck() -> muxa::Result<()> {
+    let port = muxa::app!()
+        .figment()
+        .extract_inner::<u16>("web.port")
+        .unwrap_or(DEFAULT_WEB_PORT);
+    healthcheck::probe(port).map_err(Error::other)
+}
+
+/// muxa-web's default `[web].port`, for a config that doesn't set one.
+const DEFAULT_WEB_PORT: u16 = 3000;
 
 /// Finish + serve the aide API (shared by `standalone` and `orchestrator`). `ApiPlugin`
 /// (added last) turns the `ApiRouter` into the axum router + OpenAPI document and
