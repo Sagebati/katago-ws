@@ -17,14 +17,14 @@ runs:
       run: grep -v '^\s*#' "${{ github.action_path }}/../../sibling-refs.env" | grep -v '^\s*$' >> "$GITHUB_ENV"
 
     - name: Checkout muxa (sibling build-context crate, pinned)
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         repository: ${{ env.MUXA_REPO }}
         ref: ${{ env.MUXA_REF }}
         path: muxa
 
     - name: Checkout pgmq fork (sibling build-context crate, pinned)
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         repository: ${{ env.PGMQ_REPO }}
         ref: ${{ env.PGMQ_REF }}
