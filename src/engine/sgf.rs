@@ -1,10 +1,11 @@
 //! SGF → KataGo query data.
 //!
 //! KataGo's analysis engine takes a move list + metadata (not SGF), so we parse
-//! the SGF with `sgf-parser` and emit GTP-style coordinates it understands.
+//! the SGF with `sgf-parse` (typed Go properties) and emit GTP-style
+//! coordinates it understands.
 
 use serde::{Deserialize, Serialize};
-use sgf_parser::{Action, RuleSet, SgfToken};
+use sgf_parse::go::{self, Move, Point, Prop};
 
 use crate::error::{AppError, AppResult};
 
@@ -66,80 +67,157 @@ pub struct ParsedGame {
     pub moves: Vec<ColoredMove>,
 }
 
-impl From<sgf_parser::Color> for Color {
-    fn from(color: sgf_parser::Color) -> Self {
-        match color {
-            sgf_parser::Color::Black => Color::Black,
-            sgf_parser::Color::White => Color::White,
-        }
-    }
-}
+/// Properties that decide the position KataGo replays. A malformed one of these
+/// is fatal; a malformed anything-else is ignored like any unused property.
+const GAME_PROPS: &[&str] = &["B", "W", "AB", "AW", "AE", "SZ", "KM"];
 
-/// Convert 1-indexed SGF coords (origin top-left) to a GTP string (column
+/// GTP column letters; `I` is skipped. Also caps the board size we accept.
+const GTP_LETTERS: &[u8] = b"ABCDEFGHJKLMNOPQRSTUVWXYZ";
+
+/// Convert a 0-indexed SGF point (origin top-left) to a GTP string (column
 /// letter skipping `I`, row counted from the bottom). `board_size` is needed to
 /// flip the row to bottom-origin.
-fn to_gtp(col: u8, line: u8, board_size: u8) -> String {
-    const LETTERS: &[u8] = b"ABCDEFGHJKLMNOPQRSTUVWXYZ";
-    let letter = *LETTERS.get((col - 1) as usize).unwrap_or(&b'?') as char;
-    let row = board_size as u32 + 1 - line as u32;
-    format!("{letter}{row}")
+fn to_gtp(point: Point, board_size: u8) -> AppResult<String> {
+    if point.x >= board_size || point.y >= board_size {
+        return Err(AppError::Sgf(format!(
+            "point ({}, {}) is off the {board_size}x{board_size} board",
+            point.x, point.y
+        )));
+    }
+    let letter = GTP_LETTERS
+        .get(usize::from(point.x))
+        .map_or('?', |&letter| char::from(letter));
+    let row = board_size - point.y;
+    Ok(format!("{letter}{row}"))
 }
 
-/// Parse an SGF into a [`ParsedGame`].
-pub fn parse(sgf: &str, default_size: u8, default_komi: f32) -> AppResult<ParsedGame> {
-    let tree = sgf_parser::parse(sgf).map_err(|err| AppError::Sgf(err.to_string()))?;
+/// GTP location of a move. `tt` is the pre-FF4 pass on boards up to 19x19.
+fn move_to_gtp(mv: Move, board_size: u8) -> AppResult<String> {
+    match mv {
+        Move::Pass => Ok("pass".to_owned()),
+        Move::Move(Point { x: 19, y: 19 }) if board_size <= 19 => Ok("pass".to_owned()),
+        Move::Move(point) => to_gtp(point, board_size),
+    }
+}
 
-    let mut size = default_size;
-    let mut komi: Option<f32> = None;
+/// Check that an SGF would parse into a replayable [`ParsedGame`], without
+/// keeping the result. Used at submit time so a malformed game is rejected up
+/// front instead of failing in the worker. Board size and komi defaults don't
+/// affect validity, so any values do.
+pub fn validate(sgf: &str) -> AppResult<()> {
+    parse(sgf, 19, 7.5).map(drop)
+}
+
+/// Parse an SGF into a [`ParsedGame`], following the main variation.
+///
+/// Rejects anything we'd otherwise have to guess at, since a guess desyncs the
+/// board and KataGo only notices (as an "illegal move") after the job took an
+/// engine slot: game properties `sgf-parse` couldn't type (e.g. `B[ab][bb]`, a
+/// move with several points), B and W in one node, setup stones after the first
+/// move (KataGo's query has nowhere to put them), and non-square boards.
+pub fn parse(sgf: &str, default_size: u8, default_komi: f32) -> AppResult<ParsedGame> {
+    let trees = go::parse(sgf).map_err(|err| AppError::Sgf(err.to_string()))?;
+    let root = trees
+        .first()
+        .ok_or_else(|| AppError::Sgf("no game tree".to_owned()))?;
+
+    let mut size = None;
+    let mut komi = None;
     let mut rules = Rules::Japanese;
     let mut result = None;
-    let mut initial_stones = Vec::new();
-    let mut moves = Vec::new();
+    let mut setup: Vec<(Color, Point)> = Vec::new();
+    let mut moves: Vec<(Color, Move)> = Vec::new();
 
-    let mut first = true;
-    for node in tree.iter() {
-        if first {
-            for token in &node.tokens {
-                match token {
-                    SgfToken::Komi(value) => komi = Some(*value),
-                    // SGF size is (x, y); we assume square boards.
-                    SgfToken::Size(x, _y) => size = *x as u8,
-                    SgfToken::Result(outcome) => result = Some(format!("{outcome:?}")),
-                    SgfToken::Rule(rule) => {
-                        rules = match rule {
-                            RuleSet::Chinese => Rules::Chinese,
-                            // Japanese (and anything else KataGo doesn't model here).
-                            _ => Rules::Japanese,
-                        }
-                    }
-                    SgfToken::Add {
-                        color,
-                        coordinate: (x, y),
-                    } => initial_stones.push(((*color).into(), to_gtp(*x, *y, size))),
-                    _ => {}
+    for (index, node) in root.main_variation().enumerate() {
+        let mut node_move = None;
+        for prop in node.properties() {
+            match prop {
+                // Malformed metadata (e.g. `AP[GoGoD95]`, no `:version`) is
+                // harmless; only reject what shapes the position.
+                Prop::Invalid(identifier, values) if GAME_PROPS.contains(&identifier.as_str()) => {
+                    return Err(AppError::Sgf(format!(
+                        "malformed property {identifier}[{}] in node {index}",
+                        values.join("][")
+                    )));
                 }
+                Prop::SZ((width, height)) => {
+                    if width != height {
+                        return Err(AppError::Sgf(format!(
+                            "non-square board {width}x{height} is not supported"
+                        )));
+                    }
+                    size = Some(*width);
+                }
+                Prop::KM(value) => komi = Some(*value as f32),
+                Prop::RU(rule) => {
+                    // Japanese for anything KataGo doesn't model here.
+                    rules = if rule.text.trim().eq_ignore_ascii_case("chinese") {
+                        Rules::Chinese
+                    } else {
+                        Rules::Japanese
+                    };
+                }
+                Prop::RE(outcome) => result = Some(outcome.text.clone()),
+                Prop::AB(points) | Prop::AW(points) => {
+                    if !moves.is_empty() {
+                        return Err(AppError::Sgf(format!(
+                            "setup stones after move {} are not supported",
+                            moves.len()
+                        )));
+                    }
+                    let color = if matches!(prop, Prop::AB(_)) {
+                        Color::Black
+                    } else {
+                        Color::White
+                    };
+                    setup.extend(points.iter().map(|&point| (color, point)));
+                }
+                Prop::AE(points) if !points.is_empty() => {
+                    return Err(AppError::Sgf(
+                        "removing stones (AE) is not supported".to_owned(),
+                    ));
+                }
+                Prop::B(mv) | Prop::W(mv) => {
+                    if node_move.is_some() {
+                        return Err(AppError::Sgf(format!(
+                            "node {index} has more than one move"
+                        )));
+                    }
+                    let color = if matches!(prop, Prop::B(_)) {
+                        Color::Black
+                    } else {
+                        Color::White
+                    };
+                    node_move = Some((color, *mv));
+                }
+                _ => {}
             }
-            first = false;
-        } else if let Some(SgfToken::Move { color, action }) = node
-            .tokens
-            .iter()
-            .find(|token| matches!(token, SgfToken::Move { .. }))
-        {
-            let loc = match action {
-                Action::Move(col, line) => to_gtp(*col, *line, size),
-                Action::Pass => "pass".to_owned(),
-            };
-            moves.push(((*color).into(), loc));
         }
+        moves.extend(node_move);
     }
 
+    let board_size = size.unwrap_or(default_size);
+    if board_size == 0 || usize::from(board_size) > GTP_LETTERS.len() {
+        return Err(AppError::Sgf(format!(
+            "board size {board_size} is not supported"
+        )));
+    }
+    // `AB`/`AW` are sets; sort so the KataGo query is deterministic.
+    setup.sort_by_key(|&(color, point)| (color == Color::White, point.y, point.x));
+
     Ok(ParsedGame {
-        board_size: size,
+        board_size,
         komi: komi.unwrap_or(default_komi),
         rules,
         result,
-        initial_stones,
-        moves,
+        initial_stones: setup
+            .into_iter()
+            .map(|(color, point)| Ok((color, to_gtp(point, board_size)?)))
+            .collect::<AppResult<_>>()?,
+        moves: moves
+            .into_iter()
+            .map(|(color, mv)| Ok((color, move_to_gtp(mv, board_size)?)))
+            .collect::<AppResult<_>>()?,
     })
 }
 
@@ -169,6 +247,49 @@ mod tests {
         assert!((game.komi - 7.5).abs() < f32::EPSILON);
         // pd on 19x19: col 16 -> 'Q', line 4 -> row 16 => "Q16".
         assert_eq!(game.moves[0], (Color::Black, "Q16".to_owned()));
+    }
+
+    #[test]
+    fn rejects_move_node_with_several_coordinates() {
+        // Shape of OGS game 65078272: a B node used as a setup position.
+        let sgf = "(;GM[1]SZ[19];B[ab][bb][hc]AW[ba][cb];W[gb];B[fb])";
+        let err = parse(sgf, 19, 7.5).err().unwrap();
+        assert!(matches!(err, AppError::Sgf(_)), "{err}");
+        assert!(err.to_string().contains("B[ab][bb][hc]"), "{err}");
+        assert!(validate(sgf).is_err());
+    }
+
+    #[test]
+    fn root_setup_becomes_initial_stones() {
+        let sgf = "(;GM[1]SZ[9]HA[2]AB[cc][gg];W[ee];B[tt])";
+        let game = parse(sgf, 19, 7.5).unwrap();
+        assert_eq!(
+            game.initial_stones,
+            [
+                (Color::Black, "C7".to_owned()),
+                (Color::Black, "G3".to_owned()),
+            ]
+        );
+        assert_eq!(game.moves[0], (Color::White, "E5".to_owned()));
+        // `tt` is a pass on boards up to 19x19.
+        assert_eq!(game.moves[1], (Color::Black, "pass".to_owned()));
+    }
+
+    #[test]
+    fn ignores_malformed_metadata() {
+        // AP should be `name:version`; it doesn't affect the game.
+        let game = parse("(;GM[1]AP[GoGoD95];B[pd])", 19, 7.5).unwrap();
+        assert_eq!(game.moves.len(), 1);
+    }
+
+    #[test]
+    fn rejects_setup_after_first_move() {
+        assert!(parse("(;GM[1];B[pd];W[dp]AB[aa])", 19, 7.5).is_err());
+    }
+
+    #[test]
+    fn rejects_off_board_move() {
+        assert!(parse("(;GM[1]SZ[9];B[jj])", 19, 7.5).is_err());
     }
 
     #[test]

@@ -22,7 +22,7 @@ muxa = { path = "../muxa/crates/muxa", features = [
 # `queue-experimental` upstream.
 pgmq = { git = "https://github.com/Sagebati/pgmq", rev = "1ad05960c924c26a3c5d2269017ac10164482404", default-features = false, features = ["diesel-async", "queue-experimental"] }
 # SGF parsing — used to build the KataGo move list + game metadata.
-sgf-parser = "2"
+sgf-parse = "4.2"
 
 # Orchestrator↔worker control plane over WebSocket (the `orchestrator` and
 # `worker` roles; see `src/cluster/`). The orchestrator serves the socket on its

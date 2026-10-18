@@ -17,6 +17,7 @@ use crate::cluster::registry::WorkerInfo;
 use crate::db;
 use crate::db::models::{Job, JobSummary};
 use crate::db::status::JobStatus;
+use crate::engine::sgf;
 use crate::error::{AppError, AppResult};
 use crate::http::ApiState;
 use crate::http::dto::{
@@ -250,8 +251,9 @@ pub async fn submit(
     State(api): State<ApiState>,
     body: String,
 ) -> AppResult<(StatusCode, Json<SubmitResponse>)> {
-    // Cheap structural validation; full replay happens in the worker.
-    sgf_parser::parse(&body).map_err(|err| AppError::Sgf(err.to_string()))?;
+    // Parse it the way the worker will, so a malformed game is a 400 here rather
+    // than a failed job after it took an engine slot. Full replay is the worker's.
+    sgf::validate(&body)?;
 
     // The database mints the (time-ordered v7) id and enqueues the work in one
     // transaction; we just return the id it hands back. `body` is owned and unused
