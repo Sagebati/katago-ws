@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::config::EngineConfig;
 use crate::engine::sgf::{Color, ColoredMove, ParsedGame, Rules};
@@ -282,16 +282,36 @@ struct AnalyzeCmd {
     tx: oneshot::Sender<Result<Vec<TurnResponse>, String>>,
 }
 
+/// What callers can ask of the owner task.
+enum Cmd {
+    Analyze(AnalyzeCmd),
+    /// Kill the subprocess, wait for it to exit, then acknowledge.
+    Shutdown(oneshot::Sender<()>),
+}
+
 /// Handle to a running KataGo analysis engine. Cheap to share (`Arc<Self>` over
 /// an mpsc sender); submit work with [`analyze`](Self::analyze).
 pub struct KataGo {
-    cmd_tx: mpsc::Sender<AnalyzeCmd>,
+    cmd_tx: mpsc::Sender<Cmd>,
     timeout: Duration,
+    /// Running count of analyzed positions (turn responses), published by the
+    /// owner task — the auto-tuner's throughput meter.
+    positions: watch::Receiver<u64>,
 }
 
 impl KataGo {
     /// Spawn the analysis engine. Fails clearly if the binary/model are absent.
     pub async fn spawn(cfg: &EngineConfig) -> AppResult<Arc<Self>> {
+        Self::spawn_with_stderr(cfg, None).await
+    }
+
+    /// [`spawn`](Self::spawn), additionally forwarding every stderr line to
+    /// `stderr_tap` (best effort: lines are dropped if the tap is full or gone).
+    /// The auto-tuner reads KataGo's startup log through this.
+    pub async fn spawn_with_stderr(
+        cfg: &EngineConfig,
+        stderr_tap: Option<mpsc::Sender<String>>,
+    ) -> AppResult<Arc<Self>> {
         let mut command = Command::new(&cfg.binary);
         command
             .arg("analysis")
@@ -320,8 +340,9 @@ impl KataGo {
         let stderr = child.stderr.take().expect("piped stderr");
 
         // Bounded channels: callers → owner (queries), reader → owner (lines).
-        let (cmd_tx, cmd_rx) = mpsc::channel::<AnalyzeCmd>(CMD_QUEUE_CAPACITY);
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(CMD_QUEUE_CAPACITY);
         let (line_tx, line_rx) = mpsc::channel::<String>(LINE_QUEUE_CAPACITY);
+        let (positions_tx, positions) = watch::channel(0_u64);
 
         // Reader: forward each stdout line to the owner; ends on EOF, and
         // dropping `line_tx` signals "process gone" to the owner.
@@ -339,17 +360,37 @@ impl KataGo {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 tracing::debug!(target: "katago", "{line}");
+                if let Some(tap) = &stderr_tap {
+                    let _ = tap.try_send(line);
+                }
             }
         });
 
         // Owner: the sole holder of stdin, the pending table, the id counter,
         // and the child — so the whole protocol runs without locks.
-        tokio::spawn(owner_loop(child, stdin, cmd_rx, line_rx));
+        tokio::spawn(owner_loop(child, stdin, cmd_rx, line_rx, positions_tx));
 
         Ok(Arc::new(Self {
             cmd_tx,
             timeout: Duration::from_secs(cfg.request_timeout_secs.max(1)),
+            positions,
         }))
+    }
+
+    /// A receiver of the running analyzed-positions count (every turn response
+    /// received so far, across all queries).
+    #[must_use]
+    pub fn positions(&self) -> watch::Receiver<u64> {
+        self.positions.clone()
+    }
+
+    /// Kill the subprocess and wait until it has exited, so the GPU is free
+    /// when this returns. Outstanding queries fail. Idempotent.
+    pub async fn shutdown(&self) {
+        let (tx, rx) = oneshot::channel();
+        if self.cmd_tx.send(Cmd::Shutdown(tx)).await.is_ok() {
+            let _ = rx.await;
+        }
     }
 
     /// Analyze `turns` of a game (turn `i` = the position before move `i + 1`)
@@ -393,11 +434,11 @@ impl KataGo {
             reason = "SendError only wraps the un-sent command, which carries no useful context"
         )]
         self.cmd_tx
-            .send(AnalyzeCmd {
+            .send(Cmd::Analyze(AnalyzeCmd {
                 query,
                 expected,
                 tx,
-            })
+            }))
             .await
             .map_err(|_| AppError::Inference("katago engine stopped".into()))?;
 
@@ -416,14 +457,15 @@ impl KataGo {
 /// queries, and resolves replies as turn responses arrive — all from one task,
 /// so the state is plain (no `Mutex`/`Arc`/atomics).
 ///
-/// `child` is held only to keep the subprocess alive: when every [`KataGo`]
-/// handle is dropped, `cmd_rx` closes, this loop ends, and dropping `child`
-/// triggers `kill_on_drop`.
+/// `child` is held to keep the subprocess alive: when every [`KataGo`] handle
+/// is dropped, `cmd_rx` closes, this loop ends, and dropping `child` triggers
+/// `kill_on_drop`. [`Cmd::Shutdown`] kills it explicitly and waits for the exit.
 async fn owner_loop(
-    _child: Child,
+    mut child: Child,
     mut stdin: ChildStdin,
-    mut cmd_rx: mpsc::Receiver<AnalyzeCmd>,
+    mut cmd_rx: mpsc::Receiver<Cmd>,
     mut line_rx: mpsc::Receiver<String>,
+    positions: watch::Sender<u64>,
 ) {
     let mut pending: HashMap<String, Pending> = HashMap::new();
     let mut next_id: u64 = 0;
@@ -431,7 +473,17 @@ async fn owner_loop(
     loop {
         tokio::select! {
             cmd = cmd_rx.recv() => match cmd {
-                Some(AnalyzeCmd { mut query, expected, tx }) => {
+                Some(Cmd::Shutdown(ack)) => {
+                    if let Err(err) = child.kill().await {
+                        tracing::warn!(target: "katago", "kill: {err}");
+                    }
+                    for (_, req) in pending.drain() {
+                        let _ = req.tx.send(Err("katago engine shut down".into()));
+                    }
+                    let _ = ack.send(());
+                    break;
+                }
+                Some(Cmd::Analyze(AnalyzeCmd { mut query, expected, tx })) => {
                     let id = format!("q{next_id}");
                     next_id += 1;
                     query.id = id.clone();
@@ -461,7 +513,11 @@ async fn owner_loop(
                 None => break,
             },
             line = line_rx.recv() => match line {
-                Some(line) => handle_line(&mut pending, &line),
+                Some(line) => {
+                    if handle_line(&mut pending, &line) {
+                        positions.send_modify(|count| *count += 1);
+                    }
+                }
                 None => {
                     // stdout closed → process gone; fail everything outstanding.
                     for (_, req) in pending.drain() {
@@ -475,13 +531,14 @@ async fn owner_loop(
 }
 
 /// Demux one response line into the pending table (synchronous — the owner task
-/// has exclusive access, so no locking).
-fn handle_line(pending: &mut HashMap<String, Pending>, line: &str) {
+/// has exclusive access, so no locking). Returns whether the line was an
+/// analyzed turn.
+fn handle_line(pending: &mut HashMap<String, Pending>, line: &str) -> bool {
     let value: Value = match serde_json::from_str(line) {
         Ok(parsed) => parsed,
         Err(err) => {
             tracing::warn!(target: "katago", "unparsable line: {err}");
-            return;
+            return false;
         }
     };
 
@@ -499,19 +556,19 @@ fn handle_line(pending: &mut HashMap<String, Pending>, line: &str) {
             }
             None => tracing::error!(target: "katago", "engine error: {err}"),
         }
-        return;
+        return false;
     }
     if let Some(warn) = value.get("warning").and_then(|val| val.as_str()) {
         tracing::warn!(target: "katago", "warning: {warn}");
-        return;
+        return false;
     }
 
-    let Some(id) = id else { return };
+    let Some(id) = id else { return false };
     let turn: TurnResponse = match serde_json::from_value(value) {
         Ok(parsed) => parsed,
         Err(err) => {
             tracing::warn!(target: "katago", "unparsable response: {err}");
-            return;
+            return false;
         }
     };
 
@@ -524,6 +581,7 @@ fn handle_line(pending: &mut HashMap<String, Pending>, line: &str) {
             let _ = completed.tx.send(Ok(completed.got));
         }
     }
+    true
 }
 
 #[cfg(test)]

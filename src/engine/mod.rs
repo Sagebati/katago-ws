@@ -2,16 +2,19 @@
 //! spawns the engine and shares it as `Arc<AnalysisEngine>` on the app state.
 
 pub mod annotate;
+pub mod autotune;
 pub mod katago;
 pub mod sgf;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use muxa::Sections;
 use muxa::prelude::*;
+use tokio::sync::{mpsc, watch};
 use tracing::Instrument as _;
 
-use crate::config::EngineConfig;
+use crate::config::{EngineConfig, WorkerConfig};
 use crate::engine::annotate::GameAnalysis;
 use crate::engine::katago::{KataGo, TurnResponse};
 use crate::engine::sgf::ParsedGame;
@@ -28,6 +31,48 @@ impl AnalysisEngine {
     pub async fn spawn(cfg: EngineConfig) -> AppResult<Self> {
         let katago = KataGo::spawn(&cfg).await?;
         Ok(Self { katago, cfg })
+    }
+
+    /// [`spawn`](Self::spawn), also forwarding KataGo's stderr lines to `tap`.
+    pub async fn spawn_with_stderr(
+        cfg: EngineConfig,
+        tap: Option<mpsc::Sender<String>>,
+    ) -> AppResult<Self> {
+        let katago = KataGo::spawn_with_stderr(&cfg, tap).await?;
+        Ok(Self { katago, cfg })
+    }
+
+    /// The configuration the engine runs with (after auto-tune).
+    #[must_use]
+    pub fn config(&self) -> &EngineConfig {
+        &self.cfg
+    }
+
+    /// Running count of positions KataGo has analyzed.
+    #[must_use]
+    pub fn positions(&self) -> watch::Receiver<u64> {
+        self.katago.positions()
+    }
+
+    /// Kill KataGo and wait for it to exit.
+    pub async fn shutdown(&self) {
+        self.katago.shutdown().await;
+    }
+
+    /// Analyze `turns` of an already-parsed game at `max_visits`, without
+    /// annotating them; returns how many positions were analyzed. (The
+    /// auto-tuner's workload.)
+    pub async fn analyze_positions(
+        &self,
+        game: &ParsedGame,
+        turns: std::ops::Range<usize>,
+    ) -> AppResult<usize> {
+        let turns: Vec<usize> = turns.collect();
+        let done = self
+            .katago
+            .analyze(game, &self.cfg, turns, self.cfg.max_visits, 0)
+            .await?;
+        Ok(done.len())
     }
 
     /// Analyze a full game and annotate every move.
@@ -131,17 +176,96 @@ fn merge_turns(screened: Vec<TurnResponse>, refined: Vec<TurnResponse>) -> Vec<T
 #[derive(Default)]
 pub struct KataGoEnginePlugin;
 
+/// What the plugin reads: `[engine]`, plus what the auto-tune needs to know
+/// about it — which tuning fields were set explicitly, and how many games a
+/// worker keeps in flight (`[worker].concurrency`).
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct EngineSetup {
+    #[serde(skip)]
+    engine: EngineConfig,
+    #[serde(skip)]
+    explicit: Vec<&'static str>,
+    #[serde(skip)]
+    concurrency: usize,
+}
+
+impl EngineSetup {
+    /// Read `[engine]` and the auto-tune's context from the config sections.
+    pub fn read(sections: &Sections<'_>) -> Result<Self> {
+        let engine: EngineConfig = sections.get("engine")?;
+        let concurrency = sections.get::<WorkerConfig>("worker")?.concurrency;
+        // Tuning fields given explicitly (file or env) are pinned; defaults aren't.
+        let mut explicit = Vec::new();
+        for (field, _) in autotune::TUNING_FIELDS {
+            if sections
+                .get::<Option<u32>>(&format!("engine.{field}"))?
+                .is_some()
+            {
+                explicit.push(field);
+            }
+        }
+        Ok(Self {
+            engine,
+            explicit,
+            concurrency,
+        })
+    }
+
+    /// `[engine]` after the auto-tune (or as given, when it is off or fails).
+    pub async fn tuned(self, force: bool) -> EngineConfig {
+        autotune::apply(self.engine, self.concurrency, &self.explicit, force).await
+    }
+}
+
+/// muxa plugin for `katago-ws autotune`: tune KataGo for this host into the
+/// cache and log the result, without keeping an engine running. Runs even
+/// when `[engine] autotune = false` — asking for it is explicit.
+pub struct AutotunePlugin {
+    /// Use the fast search regardless of `[engine] autotune_mode`.
+    pub fast: bool,
+    /// Re-tune even when a cached result exists.
+    pub force: bool,
+}
+
+impl<S: State> Plugin<S> for AutotunePlugin {
+    type Output = ();
+    type Config = EngineSetup;
+    const CONFIG_PREFIX: &'static str = "engine";
+
+    fn read_config(sections: &Sections<'_>) -> Result<EngineSetup> {
+        EngineSetup::read(sections)
+    }
+
+    async fn build(self, mut setup: EngineSetup, _state: &S, _ctx: &mut BuildCtx) -> Result<()> {
+        setup.engine.autotune = true;
+        if self.fast {
+            setup.engine.autotune_mode = crate::config::AutotuneMode::Fast;
+        }
+        let cfg = setup.tuned(self.force).await;
+        tracing::info!(
+            overrides = cfg.katago_overrides().as_deref().unwrap_or("none"),
+            "autotune: KataGo will start with"
+        );
+        Ok(())
+    }
+}
+
 impl<S: State> Plugin<S> for KataGoEnginePlugin {
     type Output = Arc<AnalysisEngine>;
-    type Config = EngineConfig;
+    type Config = EngineSetup;
     const CONFIG_PREFIX: &'static str = "engine";
+
+    fn read_config(sections: &Sections<'_>) -> Result<EngineSetup> {
+        EngineSetup::read(sections)
+    }
 
     async fn build(
         self,
-        cfg: EngineConfig,
+        setup: EngineSetup,
         _state: &S,
         _ctx: &mut BuildCtx,
     ) -> Result<Arc<AnalysisEngine>> {
+        let cfg = setup.tuned(false).await;
         tracing::info!(
             binary = %cfg.binary,
             model = %cfg.model,

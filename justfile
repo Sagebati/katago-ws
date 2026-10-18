@@ -53,6 +53,13 @@ bench LABEL *ARGS:
     cargo build --release
     scripts/bench.sh {{LABEL}} {{ARGS}}
 
+# Auto-tune KataGo for this host into the cache, then exit (the engine roles
+# start from it). `just autotune --fast` = the under-30 s search; --force
+# re-tunes over a cached result. Uses [engine] from config.toml / the env.
+autotune *ARGS:
+    cargo build --release
+    ./target/release/katago-ws autotune {{ARGS}}
+
 # Quick bench: 6 games, ~1 min — for fast A/B checks (compare quick with quick).
 bench-quick LABEL *ARGS:
     cargo build --release

@@ -96,6 +96,9 @@ ARG RUSTICL_DRIVERS=none
 RUN apt-get update && apt-get install -y --no-install-recommends ${RUNTIME_PKGS} \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 app \
+    # KataGo's OpenCL kernel tuning and the katago-ws auto-tune cache live here;
+    # created now so a volume mounted on it starts out owned by `app`.
+    && install -d -o app -g app /home/app/.katago \
     # Mesa ships two OpenCL implementations and enumerates the deprecated one
     # (Clover) first, so KataGo's "device 0" lands on it. On RDNA2+ Clover
     # either can't build kernels at all or loses the GPU context mid-tune. Drop

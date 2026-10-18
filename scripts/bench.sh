@@ -23,6 +23,11 @@
 # BENCH_MODEL, BENCH_KATAGO, BENCH_CORPUS (wins over the preset),
 # BENCH_CONCURRENCY, BENCH_MAX_VISITS. Requires a release build.
 #
+# The startup auto-tune ([engine] autotune) is OFF here by default, so a run
+# measures exactly the config it derives; BENCH_AUTOTUNE=true benchmarks the
+# auto-tuned settings instead (keys passed as env.KATAGO_WS_ENGINE__* with a
+# non-zero value, or in OVERRIDE_CONFIG, stay pinned).
+#
 # The derived config file is authoritative: the run zeroes [engine]'s own
 # thread/batch knobs (analysis_threads etc.), which would otherwise be passed
 # to KataGo as -override-config and win over the file.
@@ -71,6 +76,7 @@ env RUST_LOG="${RUST_LOG:-info}" \
   KATAGO_WS_ENGINE__NN_MAX_BATCH_SIZE=0 \
   KATAGO_WS_ENGINE__NN_SERVER_THREADS=0 \
   KATAGO_WS_ENGINE__SCREEN_VISITS=0 \
+  KATAGO_WS_ENGINE__AUTOTUNE="${BENCH_AUTOTUNE:-false}" \
   KATAGO_WS_BENCH__CORPUS="$corpus" \
   KATAGO_WS_BENCH__CONCURRENCY="${BENCH_CONCURRENCY:-2}" \
   KATAGO_WS_BENCH__LABEL="$label" \

@@ -150,6 +150,7 @@ production, not the committed file.
 | `KATAGO_WS_ENGINE__BINARY` / `__CONFIG` / `__MODEL` | KataGo paths (the image sets these). |
 | `KATAGO_WS_ENGINE__ANALYSIS_THREADS` / `__SEARCH_THREADS_PER_ANALYSIS` | KataGo `numAnalysisThreads` × `numSearchThreadsPerAnalysisThread` (default: system threads × `1`, the throughput preset). See [Throughput tuning](#throughput-tuning). |
 | `KATAGO_WS_ENGINE__NN_MAX_BATCH_SIZE` / `__NN_SERVER_THREADS` / `__OVERRIDE_CONFIG` | More KataGo overrides (`0` / empty = keep `analysis.cfg`). |
+| `KATAGO_WS_ENGINE__AUTOTUNE` / `__AUTOTUNE_MODE` | Startup throughput auto-tune: on by default (`false` = off); `thorough` (default) or `fast` (under ~30 s). See [Throughput tuning](#throughput-tuning). |
 | `KATAGO_WS_ENGINE__SCREEN_VISITS` | Two-pass analysis: screen every move at this many visits, re-search only the swings at `MAX_VISITS` (default `0` = off). |
 | `KATAGO_WS_WORKER__CONCURRENCY` | Worker lease loops / advertised slots (games in flight per engine; default `4`). |
 | `KATAGO_WS_WORKER__ORCHESTRATOR_URL` | `worker` role: the `ws(s)://…/cluster` URL to dial. |
@@ -186,6 +187,17 @@ The same metrics/traces/logs also export over **OTLP** if you set
 Grafana/Prometheus dashboards.
 
 ## Throughput tuning
+
+**Auto-tune.** Before launching KataGo, every engine role measures a few
+`numNNServerThreadsPerModel` × `nnMaxBatchSize` / `numAnalysisThreads` settings on
+this GPU with short trials, picks the OpenCL device (AMD's ROCm runtime over Mesa
+rusticl when both expose the card), and caches the winner in
+`~/.katago/katago-ws-autotune.json`, so only the first start pays for it (~1–1.5 min,
+or under ~30 s with `KATAGO_WS_ENGINE__AUTOTUNE_MODE=fast`). Settings you give
+explicitly are kept and only the rest are tuned; `KATAGO_WS_ENGINE__AUTOTUNE=false`
+turns it off. `katago-ws autotune [--fast] [--force]` runs it once and exits. In
+Docker, mount a volume on `/home/app/.katago` so the result (and KataGo's own
+OpenCL kernel tuning) survives restarts.
 
 KataGo's analysis engine already batches neural-net evaluations across every
 position it is searching, so throughput comes from keeping that batch full and not
