@@ -64,6 +64,18 @@ model = "model.bin.gz"
 # nn_server_threads = 0               # numNNServerThreadsPerModel (one per GPU)
 # override_config = ""                # extra raw "key=value,key=value"
 #
+# Startup auto-tune (on by default): before launching KataGo, short trials pick
+# nn_server_threads x nn_max_batch_size, analysis_threads and (OpenCL) the
+# device — ROCm over Mesa rusticl when both expose the GPU — and cache the
+# result, so later starts skip it. The four settings above are kept when set
+# here or via env (as is any key in override_config); only the rest are tuned.
+# Any failure falls back to the config as given.
+# autotune = true                    # KATAGO_WS_ENGINE__AUTOTUNE=false disables it
+# autotune_mode = "thorough"         # or "fast": under ~30 s, guided by GPU size + backend
+# autotune_cache = ""                # "" = ~/.katago/katago-ws-autotune.json (next to opencltuning/)
+# autotune_timeout_secs = 300        # incl. KataGo's first-use OpenCL kernel tuning
+# One-shot, outside any role: `katago-ws autotune [--fast] [--force]`.
+#
 # Two-pass analysis: screen every move at screen_visits, re-search at max_visits
 # only the moves whose screened win rate / score swings by a refine delta.
 # 0 (default) = off: one pass at max_visits.

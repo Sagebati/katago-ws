@@ -77,6 +77,8 @@ config — see `Role::resolve` in [`src/main.rs`](src/main.rs):
   only `/healthz`.
 - **`bench`** — KataGo only (no Postgres, no web): analyzes an SGF directory at
   a fixed concurrency and writes a JSON report ([`src/bench.rs`](src/bench.rs)).
+- **`autotune [--fast] [--force]`** — runs the startup auto-tune once into its
+  cache and exits (see "Startup auto-tune" below).
 
 `katago-ws healthcheck` is a probe, not a role: it requests this instance's own
 `GET /healthz` on `[web].port` and exits 0/1. The images' Docker `HEALTHCHECK`
@@ -169,6 +171,49 @@ positions in parallel (`[engine] analysis_threads`, 1 search thread each),
 KataGo's OpenCL backend shares one in-order command queue across NN server
 threads, which caps one process well below the GPU's capacity;
 [`patches/`](patches/) has a per-thread-queue fix (upstream: lightvector/KataGo#1267).
+
+### Startup auto-tune (`[engine] autotune`, on by default)
+
+Every role that launches KataGo (`standalone`, `worker`, `bench`) first runs
+[`engine::autotune`](src/engine/autotune/mod.rs) from `KataGoEnginePlugin`
+(whose `read_config` also reads `[worker].concurrency` and which tuning fields
+were set explicitly). Each candidate is a fresh KataGo fed an embedded 17-game
+corpus in 16-turn chunks at the queue depth of `[worker].concurrency` games;
+positions/s is read off a turn counter after a warm-up wave. It picks
+`nn_server_threads` × `nn_max_batch_size` (the build-dependent lever: stock
+OpenCL KataGo wants 4×64, the `patches/` build 8×32, KataGo's native ROCm/HIP
+backend 2×128; candidate order follows the backend `katago version` reports) and
+`analysis_threads`; `search_threads_per_analysis` is 1. On OpenCL it reads
+KataGo's device list from its startup log and pins a vendor runtime's device
+(ROCm "AMD Accelerated Parallel Processing") over Mesa rusticl on every server
+thread. Eigen (CPU) builds skip it.
+- **Modes** (`[engine] autotune_mode`): `thorough` (default,
+  [`thorough.rs`](src/engine/autotune/thorough.rs): every server×batch
+  candidate, then 256/128/512 analysis threads, near-ties re-measured; ~1–1.5 min)
+  or `fast` ([`fast.rs`](src/engine/autotune/fast.rs), under ~30 s: positions in
+  flight from the GPU's SIMD lanes — AMD KFD topology, else `clinfo` — capped by
+  the queue depth; only the server-thread split is searched, on a 1/2/4/8/16
+  ladder capped at the CPU count, from the backend's usual winner; two trials,
+  more only within a 25 s budget). A cached `thorough` result satisfies `fast`.
+- **One-shot**: `katago-ws autotune [--fast] [--force]` (`just autotune --fast`)
+  tunes into the cache and exits (`AutotunePlugin`).
+- **Precedence**: tuning fields given explicitly in the config file or env, and
+  any key in `override_config`, are pinned — never changed; only the rest are
+  tuned, and the results are written back into the `[engine]` fields (the device
+  keys into `override_config`), so `EngineConfig::katago_overrides()` still
+  builds the argument. Built-in defaults (`analysis_threads` = CPU count) and an
+  explicit `0` don't pin.
+- **Cache**: `[engine] autotune_cache` (default `~/.katago/katago-ws-autotune.json`,
+  beside KataGo's `opencltuning/`), keyed by GPU PCI ids + OpenCL ICDs, KataGo
+  binary/model/config (path, size, mtime), `max_visits`, board size, concurrency,
+  mode and the pinned keys. A hit skips tuning; delete the file to retune.
+- **Never blocks startup**: no GPU, KataGo dying, or exceeding
+  `autotune_timeout_secs` (300; a first run on a new GPU/model includes KataGo's
+  ~30–90 s OpenCL kernel tuning) logs a WARN and launches with the config as
+  given. `KATAGO_WS_ENGINE__AUTOTUNE=false` disables it.
+- **Docker**: persist `/home/app/.katago` (kernel tuning + the cache) in a volume.
+- `scripts/bench.sh` runs with auto-tune off (`BENCH_AUTOTUNE=true` to bench the
+  tuned settings), so derived-config A/B runs measure exactly what they say.
 
 ### ⚠️ "gRPC" naming is stale — the transport is WebSocket
 

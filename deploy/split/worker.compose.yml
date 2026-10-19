@@ -28,13 +28,17 @@ services:
       # Workers do the heavy lifting — tune analysis strength per host's CPU/GPU.
       KATAGO_WS_ENGINE__MAX_VISITS: "100"
       KATAGO_WS_ENGINE__REQUEST_TIMEOUT_SECS: "600"
-      # GPU throughput. The defaults (numAnalysisThreads = CPU cores, KataGo's
-      # stock batching) suit a CPU worker; on a GPU, many positions with 1 search
-      # thread each batch far better. Measured on an RX 6800 XT (b20, 100 visits)
-      # this is ~4x the stock config with one engine. With the stock OpenCL build
-      # a small net (b10) leaves the GPU ~half idle in one process, so
-      # `--scale worker=2` is worth ~+25%; with the patch in patches/, one engine
-      # with 8 server threads x batch 32 is faster still. Measure with `just bench`.
+      # GPU throughput is auto-tuned at startup: short trials pick
+      # numNNServerThreadsPerModel x nnMaxBatchSize, numAnalysisThreads and (on
+      # OpenCL) the device — ROCm over Mesa rusticl — and cache the result in
+      # /home/app/.katago (the volume below; without it every start re-tunes,
+      # plus KataGo's one-off OpenCL kernel tuning, cached there too). On an
+      # RX 6800 XT (b10, 100 visits) it picks 4x64 for stock KataGo and 8x32 for
+      # the patched build in patches/. Any of these set here is kept as given and
+      # only the rest are tuned; AUTOTUNE=false skips it, AUTOTUNE_MODE=fast
+      # trades exhaustiveness for a <30 s search.
+      # KATAGO_WS_ENGINE__AUTOTUNE: "false"
+      # KATAGO_WS_ENGINE__AUTOTUNE_MODE: "fast"
       # KATAGO_WS_ENGINE__ANALYSIS_THREADS: "256"
       # KATAGO_WS_ENGINE__NN_SERVER_THREADS: "4"
       # KATAGO_WS_ENGINE__NN_MAX_BATCH_SIZE: "64"
@@ -42,6 +46,14 @@ services:
       # an AppImage and the slim runtime has no FUSE), so no need to set it here.
       RUST_LOG: info
     restart: unless-stopped
+    # KataGo's OpenCL kernel tuning + the auto-tune cache survive restarts.
+    # Replicas share it; with --scale N on ONE GPU, start one first so the rest
+    # hit the cache instead of tuning on the GPU at the same time.
+    volumes:
+      - katago-tuning:/home/app/.katago
     # No published ports — the worker dials OUT. It serves /healthz on 3000
     # internally; uncomment to expose a liveness probe:
     # ports: ["3000:3000"]
+
+volumes:
+  katago-tuning:

@@ -56,6 +56,20 @@ fn default_refine_winrate_delta() -> f32 {
 fn default_refine_score_delta() -> f32 {
     1.0
 }
+fn default_autotune_timeout() -> u64 {
+    300
+}
+
+/// How hard `[engine] autotune` searches.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AutotuneMode {
+    /// Every candidate for the backend, near-ties re-measured.
+    #[default]
+    Thorough,
+    /// A few trials guided by the hardware and the backend; under ~30 s.
+    Fast,
+}
 
 /// `[engine]` — how to launch and drive the KataGo analysis engine.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -110,6 +124,28 @@ pub struct EngineConfig {
     /// Refine a move whose screened score swing (points, either direction) is
     /// at least this. Default: the inaccuracy threshold.
     pub refine_score_delta: f32,
+
+    /// Auto-tune KataGo's throughput settings (`analysis_threads`,
+    /// `nn_server_threads` × `nn_max_batch_size`, the OpenCL device) before
+    /// launching it, caching the result (see `engine::autotune`). Settings
+    /// given explicitly (config file or env, including keys in
+    /// `override_config`) are kept and only the rest are tuned.
+    /// `KATAGO_WS_ENGINE__AUTOTUNE=false` turns it off completely.
+    pub autotune: bool,
+    /// `thorough` (default: every candidate, near-ties re-measured; ~1–1.5 min
+    /// on a GPU) or `fast` (a hardware-sized ladder walk from the backend's
+    /// usual winner, under ~30 s). `katago-ws autotune --fast` runs the latter
+    /// once and exits.
+    pub autotune_mode: AutotuneMode,
+    /// Where the auto-tune result is cached. Empty =
+    /// `~/.katago/katago-ws-autotune.json`, beside KataGo's own OpenCL kernel
+    /// tuning (`~/.katago/opencltuning`): persist `~/.katago` in a container
+    /// volume to keep both across restarts.
+    pub autotune_cache: String,
+    /// Give up tuning (and launch with the config as given) after this many
+    /// seconds. Generous because a first run on a new GPU/model also includes
+    /// KataGo's one-off OpenCL kernel tuning.
+    pub autotune_timeout_secs: u64,
 }
 
 impl EngineConfig {
@@ -172,6 +208,10 @@ impl Default for EngineConfig {
             screen_visits: 0,
             refine_winrate_delta: default_refine_winrate_delta(),
             refine_score_delta: default_refine_score_delta(),
+            autotune: true,
+            autotune_mode: AutotuneMode::default(),
+            autotune_cache: String::new(),
+            autotune_timeout_secs: default_autotune_timeout(),
         }
     }
 }

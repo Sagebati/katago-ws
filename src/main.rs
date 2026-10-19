@@ -19,6 +19,10 @@
 //!   and writes a throughput report (see [`bench`]). No Postgres, no web server.
 //! - `healthcheck` — probes this instance's own `GET /healthz` on `[web].port` and
 //!   exits 0 or 1; the images' Docker `HEALTHCHECK` (see [`healthcheck`]).
+//! - `autotune [--fast] [--force]` — run KataGo's throughput auto-tune once
+//!   (see [`engine::autotune`]), write the cache, log the settings, exit. The
+//!   engine roles then start from the cache. `--fast` = the under-30 s search;
+//!   `--force` re-tunes even when a cached result exists.
 //!
 //! `orchestrator` + N `worker`s let the two tiers scale independently when the
 //! workers can't reach Postgres directly (the queue lease still lives on the
@@ -44,7 +48,7 @@ use muxa::prelude::*;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use crate::config::{OrchestratorConfig, WorkerConfig};
-use crate::engine::{AnalysisEngine, KataGoEnginePlugin};
+use crate::engine::{AnalysisEngine, AutotunePlugin, KataGoEnginePlugin};
 
 /// SQL migrations embedded from the `migrations/` directory. Applied at startup
 /// (in one transaction) by the diesel plugin's migrations mode — only in roles
@@ -64,6 +68,8 @@ enum Role {
     Bench,
     /// Probe this instance's `GET /healthz`, then exit (Docker `HEALTHCHECK`).
     Healthcheck,
+    /// Auto-tune KataGo's throughput settings into the cache, then exit.
+    Autotune,
 }
 
 impl Role {
@@ -81,8 +87,10 @@ impl Role {
             Some("worker") => Ok(Self::Worker),
             Some("bench") => Ok(Self::Bench),
             Some("healthcheck") => Ok(Self::Healthcheck),
+            Some("autotune") => Ok(Self::Autotune),
             Some(other) => Err(format!(
-                "unknown role {other:?}; expected one of: standalone, orchestrator, worker, bench, healthcheck"
+                "unknown role {other:?}; expected one of: standalone, orchestrator, worker, bench, \
+                 healthcheck, autotune"
             )),
         }
     }
@@ -102,6 +110,7 @@ async fn main() -> muxa::Result<()> {
         Role::Worker => run_worker().await,
         Role::Bench => run_bench().await,
         Role::Healthcheck => run_healthcheck().await,
+        Role::Autotune => run_autotune().await,
     }
 }
 
@@ -211,11 +220,34 @@ async fn run_worker() -> muxa::Result<()> {
 async fn run_bench() -> muxa::Result<()> {
     let app = muxa::app!().with_plugin(KataGoEnginePlugin).await?;
     let engine = Arc::clone(Selector::<Arc<AnalysisEngine>, _>::select(app.state()));
-    let engine_cfg = extract::<config::EngineConfig>(&app, "engine");
+    // The engine's own copy: it carries the auto-tuned settings.
+    let engine_cfg = engine.config().clone();
     let bench_cfg = extract::<bench::BenchConfig>(&app, "bench");
     bench::run(engine, &engine_cfg, bench_cfg)
         .await
         .map_err(Error::other)
+}
+
+/// `autotune [--fast] [--force]`: tune KataGo for this host into the cache
+/// (`[engine] autotune_cache`) and exit, so the engine roles start from it.
+async fn run_autotune() -> muxa::Result<()> {
+    let mut plugin = AutotunePlugin {
+        fast: false,
+        force: false,
+    };
+    for flag in std::env::args().skip(2) {
+        match flag.as_str() {
+            "--fast" => plugin.fast = true,
+            "--force" => plugin.force = true,
+            other => {
+                return Err(Error::other(format!(
+                    "unknown autotune flag {other:?}; expected --fast and/or --force"
+                )));
+            }
+        }
+    }
+    muxa::app!().with_plugin(plugin).await?;
+    Ok(())
 }
 
 /// `healthcheck`: `GET /healthz` on this instance's `[web].port` (the same config
