@@ -42,6 +42,18 @@ impl AnalysisEngine {
         Ok(Self { katago, cfg })
     }
 
+    /// [`spawn`](Self::spawn) for the long-lived service engine: KataGo is
+    /// relaunched if it exits (see [`KataGo::spawn_supervised`]).
+    pub async fn spawn_supervised(cfg: EngineConfig) -> AppResult<Self> {
+        let katago = KataGo::spawn_supervised(&cfg).await?;
+        Ok(Self { katago, cfg })
+    }
+
+    /// Wait until KataGo has loaded its model and accepts queries.
+    pub async fn wait_ready(&self) -> AppResult<()> {
+        self.katago.wait_ready().await
+    }
+
     /// The configuration the engine runs with (after auto-tune).
     #[must_use]
     pub fn config(&self) -> &EngineConfig {
@@ -274,7 +286,12 @@ impl<S: State> Plugin<S> for KataGoEnginePlugin {
             overrides = cfg.katago_overrides().as_deref().unwrap_or("none"),
             "launching KataGo analysis engine"
         );
-        let engine = AnalysisEngine::spawn(cfg).await.map_err(Error::other)?;
+        let engine = AnalysisEngine::spawn_supervised(cfg)
+            .await
+            .map_err(Error::other)?;
+        // Fail startup here, with KataGo's own reason, rather than come up
+        // "ready" and fail every job.
+        engine.wait_ready().await.map_err(Error::other)?;
         tracing::info!("KataGo analysis engine ready");
         Ok(Arc::new(engine))
     }
