@@ -12,7 +12,7 @@
 //! mpsc channel and await a oneshot reply; a reader task forwards stdout lines
 //! to the same owner task, which demultiplexes them by `id`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,6 +35,22 @@ const CMD_QUEUE_CAPACITY: usize = 64;
 /// query emits one response line per turn (hundreds), so this absorbs a burst
 /// without back-pressuring the reader.
 const LINE_QUEUE_CAPACITY: usize = 1024;
+
+/// What KataGo writes to stderr once the analysis engine accepts queries
+/// (whether or not `logToStderr` is on).
+const READY_LINE: &str = "Started, ready to begin handling requests";
+
+/// How many of KataGo's last stderr lines an exit report carries.
+const STDERR_TAIL_LINES: usize = 30;
+
+/// How long to wait for an exited KataGo's status and stderr to settle.
+const REAP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// First wait before relaunching a supervised KataGo that exited on its own;
+/// doubles while relaunches keep failing to start, up to
+/// [`RESTART_BACKOFF_MAX`].
+const RESTART_BACKOFF_MIN: Duration = Duration::from_secs(1);
+const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 /// Whose point of view KataGo's numbers are in.
 ///
@@ -289,6 +305,17 @@ enum Cmd {
     Shutdown(oneshot::Sender<()>),
 }
 
+/// Where the subprocess is in its lifecycle, as published by the owner task.
+#[derive(Debug, Clone)]
+enum Status {
+    /// Launched; KataGo hasn't announced it is ready yet.
+    Starting,
+    /// KataGo announced [`READY_LINE`].
+    Ready,
+    /// The process is gone; why, for whoever waits on startup.
+    Exited(String),
+}
+
 /// Handle to a running KataGo analysis engine. Cheap to share (`Arc<Self>` over
 /// an mpsc sender); submit work with [`analyze`](Self::analyze).
 pub struct KataGo {
@@ -297,12 +324,16 @@ pub struct KataGo {
     /// Running count of analyzed positions (turn responses), published by the
     /// owner task — the auto-tuner's throughput meter.
     positions: watch::Receiver<u64>,
+    /// Lifecycle of the current subprocess, published by the owner task.
+    status: watch::Receiver<Status>,
 }
 
 impl KataGo {
     /// Spawn the analysis engine. Fails clearly if the binary/model are absent.
+    /// If KataGo exits on its own the engine stays down: every later query
+    /// fails. (Short-lived engines — the auto-tuner's trials.)
     pub async fn spawn(cfg: &EngineConfig) -> AppResult<Arc<Self>> {
-        Self::spawn_with_stderr(cfg, None).await
+        Self::launch(cfg, None, false)
     }
 
     /// [`spawn`](Self::spawn), additionally forwarding every stderr line to
@@ -312,69 +343,88 @@ impl KataGo {
         cfg: &EngineConfig,
         stderr_tap: Option<mpsc::Sender<String>>,
     ) -> AppResult<Arc<Self>> {
-        let mut command = Command::new(&cfg.binary);
-        command
-            .arg("analysis")
-            .arg("-config")
-            .arg(&cfg.config)
-            .arg("-model")
-            .arg(&cfg.model);
+        Self::launch(cfg, stderr_tap, false)
+    }
+
+    /// [`spawn`](Self::spawn) for a long-lived engine: if KataGo exits on its
+    /// own, the exit is logged with its status and last stderr lines and the
+    /// process is relaunched (with backoff). Queries in flight at the crash
+    /// fail; queries submitted while it is down wait for the relaunch.
+    pub async fn spawn_supervised(cfg: &EngineConfig) -> AppResult<Arc<Self>> {
+        Self::launch(cfg, None, true)
+    }
+
+    fn launch(
+        cfg: &EngineConfig,
+        stderr_tap: Option<mpsc::Sender<String>>,
+        supervised: bool,
+    ) -> AppResult<Arc<Self>> {
+        let mut args = vec![
+            "analysis".to_owned(),
+            "-config".to_owned(),
+            cfg.config.clone(),
+            "-model".to_owned(),
+            cfg.model.clone(),
+        ];
         if let Some(overrides) = cfg.katago_overrides() {
-            command.arg("-override-config").arg(overrides);
+            args.push("-override-config".to_owned());
+            args.push(overrides);
         }
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|err| {
-                AppError::ModelLoad(format!(
-                    "failed to launch '{} analysis': {err} (is KataGo installed?)",
-                    cfg.binary
-                ))
-            })?;
+        let launcher = Launcher {
+            binary: cfg.binary.clone(),
+            args,
+            stderr_tap,
+        };
+        let process = launcher.launch()?;
 
-        let stdin = child.stdin.take().expect("piped stdin");
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
-
-        // Bounded channels: callers → owner (queries), reader → owner (lines).
+        // Bounded channel: callers → owner (queries).
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(CMD_QUEUE_CAPACITY);
-        let (line_tx, line_rx) = mpsc::channel::<String>(LINE_QUEUE_CAPACITY);
         let (positions_tx, positions) = watch::channel(0_u64);
-
-        // Reader: forward each stdout line to the owner; ends on EOF, and
-        // dropping `line_tx` signals "process gone" to the owner.
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if line_tx.send(line).await.is_err() {
-                    break;
-                }
-            }
-        });
-
-        // Surface KataGo's stderr (startup diagnostics, tuning, errors).
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(target: "katago", "{line}");
-                if let Some(tap) = &stderr_tap {
-                    let _ = tap.try_send(line);
-                }
-            }
-        });
+        let (status_tx, status) = watch::channel(Status::Starting);
 
         // Owner: the sole holder of stdin, the pending table, the id counter,
         // and the child — so the whole protocol runs without locks.
-        tokio::spawn(owner_loop(child, stdin, cmd_rx, line_rx, positions_tx));
+        tokio::spawn(
+            Owner {
+                launcher,
+                supervised,
+                started: false,
+                cmd_rx,
+                status: status_tx,
+                positions: positions_tx,
+                next_id: 0,
+                backlog: VecDeque::new(),
+            }
+            .run(process),
+        );
 
         Ok(Arc::new(Self {
             cmd_tx,
             timeout: Duration::from_secs(cfg.request_timeout_secs.max(1)),
             positions,
+            status,
         }))
+    }
+
+    /// Wait until KataGo has loaded its model and accepts queries. Fails with
+    /// its exit status and last stderr lines if it exits first.
+    pub async fn wait_ready(&self) -> AppResult<()> {
+        let mut status = self.status.clone();
+        #[allow(
+            clippy::map_err_ignore,
+            reason = "RecvError only means the owner task is gone, which carries no context"
+        )]
+        let seen = status
+            .wait_for(|status| !matches!(status, Status::Starting))
+            .await
+            .map_err(|_| AppError::ModelLoad("katago engine stopped".into()))?
+            .clone();
+        match seen {
+            Status::Exited(report) => Err(AppError::ModelLoad(format!(
+                "KataGo exited during startup: {report}"
+            ))),
+            Status::Ready | Status::Starting => Ok(()),
+        }
     }
 
     /// A receiver of the running analyzed-positions count (every turn response
@@ -453,80 +503,345 @@ impl KataGo {
     }
 }
 
-/// The single owner of stdin and the pending table. Assigns ids, writes
-/// queries, and resolves replies as turn responses arrive — all from one task,
-/// so the state is plain (no `Mutex`/`Arc`/atomics).
-///
-/// `child` is held to keep the subprocess alive: when every [`KataGo`] handle
-/// is dropped, `cmd_rx` closes, this loop ends, and dropping `child` triggers
-/// `kill_on_drop`. [`Cmd::Shutdown`] kills it explicitly and waits for the exit.
-async fn owner_loop(
-    mut child: Child,
-    mut stdin: ChildStdin,
-    mut cmd_rx: mpsc::Receiver<Cmd>,
-    mut line_rx: mpsc::Receiver<String>,
-    positions: watch::Sender<u64>,
-) {
-    let mut pending: HashMap<String, Pending> = HashMap::new();
-    let mut next_id: u64 = 0;
+/// Everything needed to (re)launch the subprocess.
+struct Launcher {
+    binary: String,
+    args: Vec<String>,
+    stderr_tap: Option<mpsc::Sender<String>>,
+}
 
-    loop {
-        tokio::select! {
-            cmd = cmd_rx.recv() => match cmd {
-                Some(Cmd::Shutdown(ack)) => {
-                    if let Err(err) = child.kill().await {
-                        tracing::warn!(target: "katago", "kill: {err}");
-                    }
-                    for (_, req) in pending.drain() {
-                        let _ = req.tx.send(Err("katago engine shut down".into()));
-                    }
-                    let _ = ack.send(());
+impl Launcher {
+    /// Start KataGo and the tasks that read its stdout and stderr.
+    fn launch(&self) -> AppResult<Process> {
+        let mut child = Command::new(&self.binary)
+            .args(&self.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|err| {
+                AppError::ModelLoad(format!(
+                    "failed to launch '{} analysis': {err} (is KataGo installed?)",
+                    self.binary
+                ))
+            })?;
+
+        let stdin = child.stdin.take().expect("piped stdin");
+        let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
+
+        // Bounded channel: reader → owner (lines).
+        let (line_tx, lines) = mpsc::channel::<String>(LINE_QUEUE_CAPACITY);
+        let (ready_tx, ready) = oneshot::channel();
+        let (tail_tx, tail) = oneshot::channel();
+
+        // Reader: forward each stdout line to the owner; ends on EOF, and
+        // dropping `line_tx` signals "process gone" to the owner.
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if line_tx.send(line).await.is_err() {
                     break;
                 }
-                Some(Cmd::Analyze(AnalyzeCmd { mut query, expected, tx })) => {
-                    let id = format!("q{next_id}");
-                    next_id += 1;
-                    query.id = id.clone();
+            }
+        });
 
-                    let mut line = match serde_json::to_string(&query) {
-                        Ok(json) => json,
-                        Err(err) => {
-                            let _ = tx.send(Err(format!("serialize query: {err}")));
-                            continue;
-                        }
-                    };
-                    line.push('\n');
+        // Surface KataGo's stderr (startup diagnostics, tuning, errors), spot
+        // the ready announcement, and keep the last lines for the exit report.
+        let stderr_tap = self.stderr_tap.clone();
+        tokio::spawn(async move {
+            let mut ready_tx = Some(ready_tx);
+            let mut recent = VecDeque::with_capacity(STDERR_TAIL_LINES);
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::debug!(target: "katago", "{line}");
+                if line.contains(READY_LINE)
+                    && let Some(tx) = ready_tx.take()
+                {
+                    let _ = tx.send(());
+                }
+                if let Some(tap) = &stderr_tap {
+                    let _ = tap.try_send(line.clone());
+                }
+                if recent.len() == STDERR_TAIL_LINES {
+                    recent.pop_front();
+                }
+                recent.push_back(line);
+            }
+            let _ = tail_tx.send(recent.into());
+        });
 
-                    // Write + flush as one fallible step.
-                    let write = async {
-                        stdin.write_all(line.as_bytes()).await?;
-                        stdin.flush().await
-                    };
-                    if let Err(err) = write.await {
-                        let _ = tx.send(Err(format!("write to katago: {err}")));
-                        continue;
-                    }
+        Ok(Process {
+            child,
+            stdin,
+            lines,
+            ready: Some(ready),
+            tail,
+        })
+    }
+}
 
-                    pending.insert(id, Pending { expected, got: Vec::with_capacity(expected), tx });
-                }
-                // All handles dropped → shut down (drops `child` → kill).
-                None => break,
-            },
-            line = line_rx.recv() => match line {
-                Some(line) => {
-                    if handle_line(&mut pending, &line) {
-                        positions.send_modify(|count| *count += 1);
-                    }
-                }
-                None => {
-                    // stdout closed → process gone; fail everything outstanding.
-                    for (_, req) in pending.drain() {
-                        let _ = req.tx.send(Err("katago process exited".into()));
-                    }
-                    break;
-                }
-            },
+/// One running KataGo process and the channels its I/O tasks feed.
+struct Process {
+    child: Child,
+    stdin: ChildStdin,
+    /// stdout lines; closes when the process is gone.
+    lines: mpsc::Receiver<String>,
+    /// Resolves when KataGo announces [`READY_LINE`]; `None` once it has.
+    ready: Option<oneshot::Receiver<()>>,
+    /// The last stderr lines, delivered when stderr closes.
+    tail: oneshot::Receiver<Vec<String>>,
+}
+
+impl Process {
+    /// Collect why the process went away, once its stdout has closed: its exit
+    /// status and the last lines it wrote to stderr.
+    async fn reap(&mut self) -> ExitReport {
+        let status = match tokio::time::timeout(REAP_TIMEOUT, self.child.wait()).await {
+            Ok(Ok(status)) => status.to_string(),
+            Ok(Err(err)) => format!("wait failed: {err}"),
+            Err(_) => {
+                let _ = self.child.kill().await;
+                "closed stdout; killed".to_owned()
+            }
+        };
+        let stderr = tokio::time::timeout(REAP_TIMEOUT, &mut self.tail)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
+        ExitReport { status, stderr }
+    }
+}
+
+/// Why KataGo went away.
+struct ExitReport {
+    status: String,
+    stderr: Vec<String>,
+}
+
+impl std::fmt::Display for ExitReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.status)?;
+        if !self.stderr.is_empty() {
+            write!(f, "; last stderr lines:\n{}", self.stderr.join("\n"))?;
         }
+        Ok(())
+    }
+}
+
+/// How serving one process ended.
+enum Served {
+    /// [`Cmd::Shutdown`]: the process is killed; acknowledge and stop.
+    Shutdown(oneshot::Sender<()>),
+    /// Every [`KataGo`] handle is gone; stop (dropping the child kills it).
+    Dropped,
+    /// The process went away on its own.
+    Exited(ExitReport),
+}
+
+/// The single owner of the subprocess, the id counter, and the queries waiting
+/// for a relaunch — all from one task, so the state is plain (no
+/// `Mutex`/`Arc`/atomics).
+///
+/// When every [`KataGo`] handle is dropped, `cmd_rx` closes, the loop ends, and
+/// dropping the child triggers `kill_on_drop`. [`Cmd::Shutdown`] kills it
+/// explicitly and waits for the exit.
+struct Owner {
+    launcher: Launcher,
+    /// Relaunch KataGo when it exits on its own.
+    supervised: bool,
+    /// KataGo has been ready at least once. Until then an exit is a startup
+    /// failure — reported to [`KataGo::wait_ready`], never relaunched.
+    started: bool,
+    cmd_rx: mpsc::Receiver<Cmd>,
+    status: watch::Sender<Status>,
+    positions: watch::Sender<u64>,
+    next_id: u64,
+    /// Queries received while KataGo was down, sent once it is back.
+    backlog: VecDeque<AnalyzeCmd>,
+}
+
+impl Owner {
+    async fn run(mut self, mut process: Process) {
+        let mut backoff = RESTART_BACKOFF_MIN;
+        loop {
+            let report = match self.serve(&mut process).await {
+                Served::Shutdown(ack) => {
+                    self.status
+                        .send_replace(Status::Exited("katago engine shut down".into()));
+                    let _ = ack.send(());
+                    return;
+                }
+                Served::Dropped => return,
+                Served::Exited(report) => report,
+            };
+            if !self.supervised || !self.started {
+                tracing::warn!(target: "katago", status = %report.status, stderr = %report.stderr.join("\n"), "KataGo exited");
+                self.status.send_replace(Status::Exited(report.to_string()));
+                return;
+            }
+            tracing::error!(target: "katago", status = %report.status, stderr = %report.stderr.join("\n"), "KataGo exited unexpectedly; relaunching");
+            // A crash after a healthy start relaunches promptly; one that
+            // never got going backs off further each time.
+            if matches!(*self.status.borrow(), Status::Ready) {
+                backoff = RESTART_BACKOFF_MIN;
+            }
+            self.status.send_replace(Status::Exited(report.to_string()));
+
+            process = loop {
+                if let Some(ack) = self.wait_out(backoff).await {
+                    self.status
+                        .send_replace(Status::Exited("katago engine shut down".into()));
+                    if let Some(ack) = ack {
+                        let _ = ack.send(());
+                    }
+                    return;
+                }
+                backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
+                match self.launcher.launch() {
+                    Ok(process) => {
+                        tracing::info!(target: "katago", "KataGo relaunched");
+                        self.status.send_replace(Status::Starting);
+                        break process;
+                    }
+                    Err(err) => {
+                        tracing::error!(target: "katago", %err, "KataGo relaunch failed");
+                    }
+                }
+            };
+        }
+    }
+
+    /// Run the protocol against one process until it exits, a shutdown is
+    /// asked for, or every handle is gone.
+    async fn serve(&mut self, process: &mut Process) -> Served {
+        let mut pending: HashMap<String, Pending> = HashMap::new();
+        while let Some(cmd) = self.backlog.pop_front() {
+            self.submit(&mut process.stdin, &mut pending, cmd).await;
+        }
+
+        loop {
+            tokio::select! {
+                ready = ready_signal(&mut process.ready), if process.ready.is_some() => {
+                    process.ready = None;
+                    if ready {
+                        if self.started {
+                            tracing::info!(target: "katago", "KataGo ready again");
+                        }
+                        self.started = true;
+                        self.status.send_replace(Status::Ready);
+                    }
+                }
+                cmd = self.cmd_rx.recv() => match cmd {
+                    Some(Cmd::Shutdown(ack)) => {
+                        if let Err(err) = process.child.kill().await {
+                            tracing::warn!(target: "katago", "kill: {err}");
+                        }
+                        for (_, req) in pending.drain() {
+                            let _ = req.tx.send(Err("katago engine shut down".into()));
+                        }
+                        return Served::Shutdown(ack);
+                    }
+                    Some(Cmd::Analyze(cmd)) => self.submit(&mut process.stdin, &mut pending, cmd).await,
+                    // All handles dropped → shut down (drops `child` → kill).
+                    None => return Served::Dropped,
+                },
+                line = process.lines.recv() => match line {
+                    Some(line) => {
+                        if handle_line(&mut pending, &line) {
+                            self.positions.send_modify(|count| *count += 1);
+                        }
+                    }
+                    None => {
+                        // stdout closed → process gone; fail everything outstanding.
+                        let report = process.reap().await;
+                        for (_, req) in pending.drain() {
+                            let _ = req.tx.send(Err(format!("katago process exited ({})", report.status)));
+                        }
+                        return Served::Exited(report);
+                    }
+                },
+            }
+        }
+    }
+
+    /// Wait `delay` while KataGo is down, holding queries for the relaunch.
+    /// `Some` means stop instead: `Some(Some(ack))` for a shutdown to
+    /// acknowledge, `Some(None)` when every handle is gone.
+    async fn wait_out(&mut self, delay: Duration) -> Option<Option<oneshot::Sender<()>>> {
+        let sleep = tokio::time::sleep(delay);
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                () = &mut sleep => return None,
+                cmd = self.cmd_rx.recv() => match cmd {
+                    Some(Cmd::Analyze(cmd)) => self.backlog.push_back(cmd),
+                    Some(Cmd::Shutdown(ack)) => {
+                        for cmd in self.backlog.drain(..) {
+                            let _ = cmd.tx.send(Err("katago engine shut down".into()));
+                        }
+                        return Some(Some(ack));
+                    }
+                    None => return Some(None),
+                },
+            }
+        }
+    }
+
+    /// Assign the query an id, write it to KataGo, and track its reply.
+    async fn submit(
+        &mut self,
+        stdin: &mut ChildStdin,
+        pending: &mut HashMap<String, Pending>,
+        AnalyzeCmd {
+            mut query,
+            expected,
+            tx,
+        }: AnalyzeCmd,
+    ) {
+        let id = format!("q{}", self.next_id);
+        self.next_id += 1;
+        query.id = id.clone();
+
+        let mut line = match serde_json::to_string(&query) {
+            Ok(json) => json,
+            Err(err) => {
+                let _ = tx.send(Err(format!("serialize query: {err}")));
+                return;
+            }
+        };
+        line.push('\n');
+
+        // Write + flush as one fallible step.
+        let write = async {
+            stdin.write_all(line.as_bytes()).await?;
+            stdin.flush().await
+        };
+        if let Err(err) = write.await {
+            let _ = tx.send(Err(format!("write to katago: {err}")));
+            return;
+        }
+
+        pending.insert(
+            id,
+            Pending {
+                expected,
+                got: Vec::with_capacity(expected),
+                tx,
+            },
+        );
+    }
+}
+
+/// Whether KataGo announced it is ready (`false`: stderr closed first). Pends
+/// forever once the signal has been taken, so a disabled `select!` branch
+/// never fires.
+async fn ready_signal(ready: &mut Option<oneshot::Receiver<()>>) -> bool {
+    match ready {
+        Some(rx) => rx.await.is_ok(),
+        None => std::future::pending().await,
     }
 }
 
