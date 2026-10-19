@@ -28,6 +28,7 @@
 //! workers can't reach Postgres directly (the queue lease still lives on the
 //! orchestrator, so a worker crash is redelivered exactly as a local crash is).
 
+mod auth;
 mod bench;
 mod cluster;
 mod config;
@@ -47,7 +48,7 @@ use muxa::prelude::*;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use crate::config::{OrchestratorConfig, WorkerConfig};
+use crate::config::{ApiConfig, OrchestratorConfig, WorkerConfig};
 use crate::engine::{AnalysisEngine, AutotunePlugin, KataGoEnginePlugin};
 
 /// SQL migrations embedded from the `migrations/` directory. Applied at startup
@@ -136,6 +137,7 @@ async fn run_standalone() -> muxa::Result<()> {
     let engine = Arc::clone(Selector::<Arc<AnalysisEngine>, _>::select(app.state()));
     let worker_cfg = extract::<WorkerConfig>(&app, "worker");
     let rl_cfg = extract::<RateLimitConfig>(&app, "ratelimit");
+    let api_cfg = extract::<ApiConfig>(&app, "api");
 
     let mut app = app;
     worker::register(app.ctx_mut(), db.clone(), engine, worker_cfg);
@@ -148,6 +150,7 @@ async fn run_standalone() -> muxa::Result<()> {
         db,
         workers: None,
         cluster: None,
+        client_token: http::ApiState::client_token(api_cfg.client_token),
     };
     serve_api(app, api, &rl_cfg).await
 }
@@ -171,6 +174,7 @@ async fn run_orchestrator() -> muxa::Result<()> {
     let worker_cfg = extract::<WorkerConfig>(&app, "worker");
     let orch_cfg = extract::<OrchestratorConfig>(&app, "orchestrator");
     let rl_cfg = extract::<RateLimitConfig>(&app, "ratelimit");
+    let api_cfg = extract::<ApiConfig>(&app, "api");
     // Connection lifetimes derive from the app-wide shutdown token.
     let shutdown = app.ctx().shutdown.clone();
 
@@ -188,6 +192,7 @@ async fn run_orchestrator() -> muxa::Result<()> {
         db,
         workers: Some(registry),
         cluster: Some(Arc::new(dispatcher)),
+        client_token: http::ApiState::client_token(api_cfg.client_token),
     };
     serve_api(app, api, &rl_cfg).await
 }
