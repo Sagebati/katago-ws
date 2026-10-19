@@ -27,6 +27,47 @@ docker push registry.example.com/katago-ws:latest
 One image serves every role — the role is just the first CLI arg (the compose
 `command:`). Use that `KATAGO_WS_IMAGE` value on all machines.
 
+### Picking a worker image
+
+The plain build above is the CPU (Eigen) image. GPU workers want a per-platform
+variant, built from `katago-ws/` with `just cpu | cuda | opencl | rocm | rocm-hip`
+(the justfile has the build-args and per-variant notes):
+
+| Image      | GPU runtime                                   | Use it for |
+|------------|-----------------------------------------------|------------|
+| `cpu`      | none                                          | the orchestrator; CPU-only workers |
+| `cuda`     | NVIDIA CUDA + cuDNN                           | NVIDIA GPUs |
+| `opencl`   | Mesa rusticl (Debian trixie)                  | Intel GPUs, AMD GPUs ROCm doesn't support |
+| `rocm`     | AMD's ROCm OpenCL ICD, patched KataGo v1.16.5 | **AMD GPUs that ROCm supports** (RDNA2+/CDNA) — the AMD default |
+| `rocm-hip` | AMD ROCm MIOpen + hipBLAS, KataGo master      | the same GPUs, if ~7% more throughput with small nets is worth a ~4 GB image |
+
+On an RX 6800 XT (100 visits, one engine, each image with its best setting):
+
+| Image      | Setting (server threads x batch) | b10 (default net) | b20 | Size |
+|------------|------|------:|-----:|-----:|
+| `rocm`     | 8 x 32  | ~170 | ~36 | 356 MB |
+| `rocm-hip` | 2 x 128 | ~178 | ~36 | 4.0 GB |
+
+Both ROCm images are Ubuntu 24.04 with AMD's ROCm 7.2.3 from repo.radeon.com
+(Ubuntu because AMD's official ROCm images and packages are Ubuntu). They need the KFD and DRM
+devices and the host's `video`/`render` GIDs (the image runs as uid 10001); the
+container's ROCm needn't match the host's, only the kernel's amdgpu driver:
+
+```sh
+docker run --device /dev/kfd --device /dev/dri \
+  --group-add "$(getent group video | cut -d: -f3)" \
+  --group-add "$(getent group render | cut -d: -f3)" \
+  -e KATAGO_WS_WORKER__ORCHESTRATOR_URL=ws://<orchestrator>:3000/cluster \
+  -e KATAGO_WS_ENGINE__OVERRIDE_CONFIG="numAnalysisThreads=256,numSearchThreadsPerAnalysisThread=1,nnMaxBatchSize=32,numNNServerThreadsPerModel=8" \
+  katago-ws:rocm worker
+```
+
+For `rocm-hip` use `nnMaxBatchSize=128,numNNServerThreadsPerModel=2` instead.
+Run one worker per GPU. `rocm` tunes its OpenCL kernels on first start (~90 s,
+cached in `/home/app/.katago/opencltuning`); `rocm-hip` starts in ~7-12 s while
+MIOpen compiles its kernels (cached in `/home/app/.cache/miopen`). Mount a volume
+on `/home/app` to keep either across restarts.
+
 ## 2. Orchestrator machine
 
 ```sh

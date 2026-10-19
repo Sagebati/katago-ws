@@ -1,13 +1,15 @@
 # katago-ws — per-platform deployable image.
 #
-# One Dockerfile, parameterized by build-args, builds a CPU / CUDA / OpenCL(AMD)
-# image. See the Makefile for the three ready-made targets, or:
+# One Dockerfile, parameterized by build-args, builds a CPU / CUDA / OpenCL
+# (Mesa) / ROCm (AMD OpenCL) / ROCm-HIP image. See the justfile for the
+# ready-made targets, or:
 #
 #   docker build -f katago-ws/Dockerfile -t katago-ws:cpu .     # from the PARENT dir
 #
-# The Rust binary is a standard glibc (Debian) build. KataGo's CPU build is
-# statically linked; its GPU builds dynamically link the vendor runtime supplied
-# by the base image.
+# The Rust binary is a standard glibc (Debian) build. KataGo comes either from a
+# release zip (KATAGO_ZIP: an AppImage) or, with KATAGO_BUILD_BACKEND set, is
+# built from source (the rocm/rocm-hip images; patches/README.md). Its GPU
+# builds dynamically link the vendor runtime supplied by the base image.
 #
 # Build context must be the PARENT directory (contains katago-ws, muxa, pgmq).
 
@@ -26,6 +28,24 @@ ARG KATAGO_ZIP=katago-v1.16.5-eigen-linux-x64.zip
 ARG MODEL_URL=https://katagoarchive.org/g170/neuralnets/g170e-b10c128-s1141046784-d204142634.bin.gz
 ARG CONFIG_URL=https://raw.githubusercontent.com/lightvector/KataGo/${KATAGO_VERSION}/cpp/configs/analysis_example.cfg
 ARG RUNTIME_PKGS=ca-certificates
+# Empty: use the release binary from KATAGO_ZIP. A KataGo backend (OPENCL,
+# ROCM): build KATAGO_SRC_REF (a tag or full commit) from source with any
+# patches/katago-${KATAGO_SRC_REF}-*.patch applied, and skip the zip. A source
+# build is a plain ELF, so RUNTIME_PKGS must then provide its shared libs.
+ARG KATAGO_BUILD_BACKEND=
+ARG KATAGO_SRC_REF=v1.16.5
+# Base image and apt packages of the source-build stage (the defaults build the
+# OpenCL backend). The build base must match RUNTIME_BASE's distro release.
+ARG KATAGO_BUILD_BASE=debian:trixie-slim
+ARG KATAGO_BUILD_PKGS="ca-certificates git cmake ninja-build g++ zlib1g-dev libzip-dev opencl-headers ocl-icd-opencl-dev"
+# ROCM backend only: the AMD GPU archs to compile for (space-separated). The
+# runtime stage also deletes rocBLAS/hipBLASLt/MIOpen per-arch kernel files for
+# every other arch, which is most of their size.
+ARG HIP_ARCHS=
+# Optional extra apt repo for the source-build and runtime stages (AMD's ROCm
+# repo): an ASCII-armored signing key URL and the rest of a `deb` line.
+ARG RUNTIME_APT_KEY_URL=
+ARG RUNTIME_APT_REPO=
 
 ###############################################################################
 # Stage 1 — build the Rust binary (glibc / Debian)
@@ -62,23 +82,83 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM debian:bookworm-slim AS katago
 ARG KATAGO_VERSION
 ARG KATAGO_ZIP
+ARG KATAGO_BUILD_BACKEND
 ARG MODEL_URL
 ARG CONFIG_URL
+ARG RUNTIME_APT_KEY_URL
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl unzip ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# The engine lands in /kata/bin/, left empty when katago-src builds it instead.
 WORKDIR /kata
-RUN curl -fsSL -o katago.zip \
-        "https://github.com/lightvector/KataGo/releases/download/${KATAGO_VERSION}/${KATAGO_ZIP}" \
-    && unzip -o katago.zip \
-    && find . -type f -name katago -exec cp {} /kata/katago \; \
-    && chmod +x /kata/katago \
-    && curl -fsSL -o /kata/model.bin.gz "${MODEL_URL}" \
-    && curl -fsSL -o /kata/analysis.cfg "${CONFIG_URL}" \
-    && sed -i 's#^logDir.*#logDir = /tmp/katago-logs#' /kata/analysis.cfg \
-    && rm -f katago.zip
+RUN set -eu; mkdir -p /kata/bin /kata/keyrings; \
+    if [ -z "${KATAGO_BUILD_BACKEND}" ]; then \
+      curl -fsSL -o katago.zip \
+        "https://github.com/lightvector/KataGo/releases/download/${KATAGO_VERSION}/${KATAGO_ZIP}"; \
+      unzip -o katago.zip; \
+      find . -type f -name katago -exec cp {} /kata/bin/katago \; ; \
+      chmod +x /kata/bin/katago; \
+      rm -f katago.zip; \
+    fi; \
+    curl -fsSL -o /kata/model.bin.gz "${MODEL_URL}"; \
+    curl -fsSL -o /kata/analysis.cfg "${CONFIG_URL}"; \
+    sed -i 's#^logDir.*#logDir = /tmp/katago-logs#' /kata/analysis.cfg; \
+    if [ -n "${RUNTIME_APT_KEY_URL}" ]; then \
+      curl -fsSL -o /kata/keyrings/runtime-repo.asc "${RUNTIME_APT_KEY_URL}"; \
+    fi
+
+###############################################################################
+# Stage 2b — build KataGo from source (KATAGO_BUILD_BACKEND)
+###############################################################################
+# A no-op leaving /out/bin/ empty unless KATAGO_BUILD_BACKEND is set. The rocm /
+# rocm-hip images build on ubuntu:24.04 (KATAGO_BUILD_BASE), like their runtimes.
+#  - OPENCL (rocm image): v1.16.5 + the per-handle command queue patch, ~2.2x
+#    the positions/s of the release binary on an RX 6800 XT (patches/README.md).
+#  - ROCM (rocm-hip image): KataGo master's native MIOpen + hipBLAS backend,
+#    built against AMD's ROCm dev packages (RUNTIME_APT_REPO) for HIP_ARCHS.
+# AMD's repo is pinned above Debian's own (older) ROCm packages, as AMD's install
+# guide does: Ubuntu universe's hipcc/rocm-cmake carry higher version strings.
+FROM ${KATAGO_BUILD_BASE} AS katago-src
+ARG KATAGO_SRC_REF
+ARG KATAGO_BUILD_BACKEND
+ARG KATAGO_BUILD_PKGS
+ARG RUNTIME_APT_REPO
+ARG HIP_ARCHS
+
+COPY --from=katago /kata/keyrings/ /etc/apt/keyrings/
+COPY katago-ws/patches/ /patches/
+RUN set -eu; mkdir -p /out/bin; \
+    if [ -n "${KATAGO_BUILD_BACKEND}" ]; then \
+      apt-get update; \
+      if [ -n "${RUNTIME_APT_REPO}" ]; then \
+        apt-get install -y --no-install-recommends ca-certificates; \
+        echo "deb [signed-by=/etc/apt/keyrings/runtime-repo.asc] ${RUNTIME_APT_REPO}" \
+          > /etc/apt/sources.list.d/runtime-repo.list; \
+        printf 'Package: *\nPin: origin %s\nPin-Priority: 600\n' \
+          "$(echo ${RUNTIME_APT_REPO} | cut -d/ -f3)" > /etc/apt/preferences.d/runtime-repo; \
+        apt-get update; \
+      fi; \
+      apt-get install -y --no-install-recommends ${KATAGO_BUILD_PKGS}; \
+      git init -q /src; \
+      git -C /src fetch -q --depth 1 https://github.com/lightvector/KataGo.git "${KATAGO_SRC_REF}"; \
+      git -C /src checkout -q FETCH_HEAD; \
+      for patch in /patches/katago-${KATAGO_SRC_REF}-*.patch; do \
+        if [ -e "$patch" ]; then git -C /src apply -v "$patch"; fi; \
+      done; \
+      set --; \
+      if [ -n "${HIP_ARCHS}" ]; then \
+        set -- "-DCMAKE_HIP_ARCHITECTURES=$(echo ${HIP_ARCHS} | tr ' ' ';')"; \
+      fi; \
+      cmake -S /src/cpp -B /src/build -G Ninja \
+        -DUSE_BACKEND="${KATAGO_BUILD_BACKEND}" -DCMAKE_BUILD_TYPE=Release "$@"; \
+      cmake --build /src/build; \
+      cp /src/build/katago /out/bin/katago; \
+      # Only /out/bin leaves this stage: drop the ROCm toolchain (~13 GB) in
+      # this same layer so it's never committed to the build cache.
+      rm -rf /src /var/lib/apt/lists/* /opt/rocm*; \
+    fi
 
 ###############################################################################
 # Stage 3 — runtime base (everything but the katago-ws binary; base varies per
@@ -92,29 +172,67 @@ RUN curl -fsSL -o katago.zip \
 FROM ${RUNTIME_BASE} AS runtime-base
 ARG RUNTIME_PKGS
 ARG RUSTICL_DRIVERS=none
+ARG RUNTIME_APT_REPO
+ARG HIP_ARCHS
 
-RUN apt-get update && apt-get install -y --no-install-recommends ${RUNTIME_PKGS} \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 10001 app \
+# With RUNTIME_APT_REPO set, the repo is added (signed by the key fetched in the
+# katago stage, pinned as in katago-src) before installing RUNTIME_PKGS.
+# With HIP_ARCHS set, the ROCm math libraries' per-arch kernel files (rocBLAS /
+# hipBLASLt Tensile libraries, MIOpen kernel DBs: names carry a gfxNNN token)
+# are deleted for every arch not listed — in this same layer, or they'd still
+# ship. No real gfx arch name is a prefix of another, so prefix matching also
+# keeps MIOpen's "<arch><CUs>" DB names.
+COPY --from=katago /kata/keyrings/ /etc/apt/keyrings/
+RUN set -eu; apt-get update; \
+    if [ -n "${RUNTIME_APT_REPO}" ]; then \
+      apt-get install -y --no-install-recommends ca-certificates; \
+      echo "deb [signed-by=/etc/apt/keyrings/runtime-repo.asc] ${RUNTIME_APT_REPO}" \
+        > /etc/apt/sources.list.d/runtime-repo.list; \
+      printf 'Package: *\nPin: origin %s\nPin-Priority: 600\n' \
+        "$(echo ${RUNTIME_APT_REPO} | cut -d/ -f3)" > /etc/apt/preferences.d/runtime-repo; \
+      apt-get update; \
+    fi; \
+    apt-get install -y --no-install-recommends ${RUNTIME_PKGS}; \
+    rm -rf /var/lib/apt/lists/*; \
+    if [ -n "${HIP_ARCHS}" ]; then \
+      find /opt/rocm*/lib/rocblas/library /opt/rocm*/lib/hipblaslt/library \
+           /opt/rocm*/share/miopen/db -type f -name '*gfx*' 2>/dev/null \
+        | while read -r file; do \
+            token=$(basename "$file" | grep -o 'gfx[0-9a-z]*' | head -n 1); \
+            for arch in ${HIP_ARCHS}; do \
+              case "$token" in "$arch"*) continue 2 ;; esac; \
+            done; \
+            rm -f "$file"; \
+          done; \
+      rm -rf /opt/rocm*/share/doc; \
+    fi; \
+    useradd --create-home --uid 10001 app; \
     # KataGo's OpenCL kernel tuning and the katago-ws auto-tune cache live here;
     # created now so a volume mounted on it starts out owned by `app`.
-    && install -d -o app -g app /home/app/.katago \
+    install -d -o app -g app /home/app/.katago; \
     # Mesa ships two OpenCL implementations and enumerates the deprecated one
     # (Clover) first, so KataGo's "device 0" lands on it. On RDNA2+ Clover
     # either can't build kernels at all or loses the GPU context mid-tune. Drop
     # its ICD so rusticl is the only Mesa OpenCL on offer; rusticl covers the
-    # same gallium drivers, GCN onward. A no-op on the CPU/CUDA images, which
-    # have no Mesa.
-    && rm -f /etc/OpenCL/vendors/mesa.icd
+    # same gallium drivers, GCN onward. A no-op on the images without Mesa.
+    rm -f /etc/OpenCL/vendors/mesa.icd
 
-COPY --from=katago /kata/katago           /opt/katago/katago
-COPY --from=katago /kata/model.bin.gz     /opt/katago/model.bin.gz
-COPY --from=katago /kata/analysis.cfg     /opt/katago/analysis.cfg
-COPY katago-ws/config.toml           /app/config.toml
+# Exactly one of these two holds the engine (the other dir is empty).
+COPY --from=katago     /kata/bin/         /opt/katago/
+COPY --from=katago-src /out/bin/          /opt/katago/
+COPY --from=katago     /kata/model.bin.gz /opt/katago/model.bin.gz
+COPY --from=katago     /kata/analysis.cfg /opt/katago/analysis.cfg
+COPY katago-ws/config.toml                /app/config.toml
+
+# Fail the build, not the first job, if the engine is missing or a source
+# build's shared libs aren't in RUNTIME_PKGS (the AppImages bundle theirs).
+RUN set -eu; test -x /opt/katago/katago; \
+    if ldd /opt/katago/katago 2>/dev/null | grep 'not found'; then exit 1; fi
 
 WORKDIR /app
 
-# KataGo ships as an AppImage; the slim runtime has no FUSE, so
+# Release KataGo ships as an AppImage (source builds are plain ELFs, for which
+# this is a no-op); the slim runtime has no FUSE, so
 # APPIMAGE_EXTRACT_AND_RUN makes it extract-and-run instead of self-mounting
 # (else "Cannot mount AppImage"). Baked in so every engine role (standalone,
 # worker) works out of the box — no per-deploy env needed.
