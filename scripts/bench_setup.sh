@@ -54,9 +54,14 @@ fetch_games() {
   for id in $(seq "$start" 1931 70000000); do
     (( have >= want )) && break
     local sgf moves
+    # Already fetched on an earlier run: `have` counted it at the start, so
+    # skip it instead of downloading it again and counting it twice.
+    [[ -e "$out/ogs-$id.sgf" ]] && continue
     sgf=$(curl -fsSL --max-time 10 "https://online-go.com/api/v1/games/$id/sgf" 2>/dev/null) || continue
     grep -q 'SZ\[19\]' <<<"$sgf" || continue
-    moves=$(grep -oE ';[BW]\[[a-s]{2}\]' <<<"$sgf" | wc -l)
+    # `|| true`: a 19x19 game with no moves makes grep exit 1, which pipefail +
+    # set -e would turn into a silent exit of the whole script.
+    moves=$({ grep -oE ';[BW]\[[a-s]{2}\]' <<<"$sgf" || true; } | wc -l)
     (( moves >= 120 )) || continue
     printf '%s\n' "$sgf" > "$out/ogs-$id.sgf"
     have=$((have + 1))
