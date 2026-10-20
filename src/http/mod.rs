@@ -67,7 +67,10 @@ pub fn api_router(state: ApiState, rl: &RateLimitConfig) -> Result<ApiRouter> {
         "/analyse",
         post_with(handlers::submit, |op| {
             op.summary("Submit an SGF for analysis")
-                .description("Validates the SGF, persists a queued job, enqueues it, and returns the job id.")
+                .description(
+                    "Validates the SGF (raw, as the request body) and the optional \
+                     `human_profile`, persists a queued job, enqueues it, and returns the job id.",
+                )
                 .tag("analyses")
         }),
     );
@@ -84,8 +87,9 @@ pub fn api_router(state: ApiState, rl: &RateLimitConfig) -> Result<ApiRouter> {
                         "Up to 100 SGFs in one request, not IP rate-limited. When the \
                          deployment sets `[api].client_token`, requires \
                          `Authorization: Bearer <token>` (401 otherwise); when it doesn't, \
-                         anyone may call it. Each SGF gets a result at its own index — a \
-                         job id, or why it was refused.",
+                         anyone may call it. Each entry is a bare SGF string or \
+                         `{\"sgf\": …, \"human_profile\": …}`, and gets a result at its \
+                         own index — a job id, or why it was refused.",
                     )
                     .tag("analyses")
             }),

@@ -19,12 +19,12 @@ use crate::cluster::registry::WorkerInfo;
 use crate::db;
 use crate::db::models::{Job, JobSummary};
 use crate::db::status::JobStatus;
-use crate::engine::sgf;
+use crate::engine::{human, sgf};
 use crate::error::{AppError, AppResult};
 use crate::http::ApiState;
 use crate::http::dto::{
     AnalysisSummary, BatchItem, BatchSubmitRequest, BatchSubmitResponse, Change, ChangesQuery,
-    ChangesResponse, JobId, ListResponse, StatusQuery, StatusResponse, SubmitResponse,
+    ChangesResponse, JobId, ListResponse, StatusQuery, StatusResponse, SubmitQuery, SubmitResponse,
     WorkerSummary, WorkersResponse,
 };
 
@@ -248,21 +248,32 @@ const INDEX_FOOT: &str = concat!(
     "</body></html>",
 );
 
-/// `POST /analyse` — body is the raw SGF. Validates it parses, persists a
-/// queued job, enqueues it, and returns `202` with the job id.
+/// `POST /analyse` — body is the raw SGF; `?human_profile=` optionally asks
+/// for the human policy. Validates both, persists a queued job, enqueues it,
+/// and returns `202` with the job id.
 pub async fn submit(
     State(api): State<ApiState>,
+    Query(query): Query<SubmitQuery>,
     body: String,
 ) -> AppResult<(StatusCode, Json<SubmitResponse>)> {
     // Parse it the way the worker will, so a malformed game is a 400 here rather
     // than a failed job after it took an engine slot. Full replay is the worker's.
     sgf::validate(&body)?;
+    // KataGo fails the whole query over an unknown profile, every retry alike.
+    let human_profile = human::parse(query.human_profile)?;
 
     // The database mints the (time-ordered v7) id and enqueues the work in one
     // transaction; we just return the id it hands back. `body` is owned and unused
     // after this, so it moves straight into the queue message — no extra copy of
     // the (potentially large) SGF.
-    let job_id = db::submit(&api.db, body).await?;
+    let job_id = db::submit(
+        &api.db,
+        db::NewJob {
+            sgf: body,
+            human_profile,
+        },
+    )
+    .await?;
 
     Ok((
         StatusCode::ACCEPTED,
@@ -309,11 +320,12 @@ pub async fn submit_batch(
 
     let mut refused: Vec<Option<String>> = Vec::with_capacity(body.sgfs.len());
     let mut accepted = Vec::new();
-    for sgf in body.sgfs {
-        match sgf::validate(&sgf) {
-            Ok(()) => {
+    for game in body.sgfs {
+        let (sgf, human_profile) = game.into_parts();
+        match sgf::validate(&sgf).and_then(|()| human::parse(human_profile)) {
+            Ok(human_profile) => {
                 refused.push(None);
-                accepted.push(sgf);
+                accepted.push(db::NewJob { sgf, human_profile });
             }
             Err(err) => refused.push(Some(err.to_string())),
         }
@@ -521,6 +533,7 @@ mod tests {
     use secrecy::SecretString;
 
     use super::*;
+    use crate::http::dto::BatchGame;
 
     /// State whose pool is never dialled: deadpool connects lazily, and every
     /// path these tests take returns before touching the database.
@@ -547,7 +560,10 @@ mod tests {
 
     fn batch(sgfs: &[&str]) -> Json<BatchSubmitRequest> {
         Json(BatchSubmitRequest {
-            sgfs: sgfs.iter().map(|sgf| (*sgf).to_owned()).collect(),
+            sgfs: sgfs
+                .iter()
+                .map(|sgf| BatchGame::Sgf((*sgf).to_owned()))
+                .collect(),
         })
     }
 
@@ -605,6 +621,43 @@ mod tests {
                 .iter()
                 .all(|item| item.job_id.is_none() && item.error.is_some())
         );
+    }
+
+    /// A game may come as a bare SGF or with options; an unknown human
+    /// profile refuses that game alone, before anything reaches the database.
+    #[tokio::test]
+    async fn batch_refuses_a_game_with_an_unknown_human_profile() {
+        let body: BatchSubmitRequest = serde_json::from_value(serde_json::json!({
+            "sgfs": [
+                {"sgf": "(;GM[1]SZ[19];B[pd])", "human_profile": "rank_99k"},
+                {"sgf": "not an sgf", "human_profile": "rank_5k"},
+            ]
+        }))
+        .unwrap();
+        let (_, Json(response)) = submit_batch(State(state("")), HeaderMap::new(), Json(body))
+            .await
+            .unwrap();
+        let errors: Vec<_> = response
+            .results
+            .iter()
+            .map(|item| item.error.as_deref().unwrap_or_default())
+            .collect();
+        assert!(errors[0].contains("human_profile"), "{errors:?}");
+        assert!(!errors[1].is_empty());
+    }
+
+    /// Both shapes of a batch entry parse, so existing clients sending bare
+    /// strings are unaffected.
+    #[test]
+    fn a_batch_mixes_bare_sgfs_and_games_with_options() {
+        let body: BatchSubmitRequest = serde_json::from_value(serde_json::json!({
+            "sgfs": ["(;GM[1])", {"sgf": "(;GM[1])", "human_profile": "rank_1d"}, {"sgf": "(;GM[1])"}]
+        }))
+        .unwrap();
+        let parts: Vec<_> = body.sgfs.into_iter().map(BatchGame::into_parts).collect();
+        assert_eq!(parts[0].1, None);
+        assert_eq!(parts[1].1.as_deref(), Some("rank_1d"));
+        assert_eq!(parts[2].1, None);
     }
 
     #[test]

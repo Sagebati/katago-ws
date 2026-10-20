@@ -20,7 +20,7 @@ use serde::Serialize;
 
 use crate::config::EngineConfig;
 use crate::engine::katago::{Eval, REPORT_PERSPECTIVE, RootInfo, TurnResponse};
-use crate::engine::sgf::{Color, ParsedGame, Rules};
+use crate::engine::sgf::{self, Color, ParsedGame, Rules};
 
 /// The payload contract version.
 ///
@@ -30,7 +30,11 @@ use crate::engine::sgf::{Color, ParsedGame, Rules};
 /// - `1` — assumed KataGo reported from the side to move. Every per-move loss
 ///   in a v1 payload is the wrong number, not merely an imprecise one.
 /// - `2` — perspective-correct, and carries per-turn ownership.
-pub const PAYLOAD_VERSION: u32 = 2;
+/// - `3` — adds per-turn `ownership_stdev`, `policy` and (with a human profile)
+///   `human_policy` grids, and `prior`/`human_prior` on the played move and
+///   `human_prior` on candidates. Every v2 field is unchanged, so a v2 reader
+///   reads a v3 payload as it was.
+pub const PAYLOAD_VERSION: u32 = 3;
 
 /// How a played move is judged, by either lens (win-rate loss or score loss).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -57,6 +61,10 @@ pub struct Candidate {
     pub score_lead: f32,
     /// Raw policy prior.
     pub prior: f32,
+    /// The human SL network's prior for this move, under the job's
+    /// `human_profile`. Absent without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub human_prior: Option<f32>,
     /// MCTS visits.
     pub visits: u32,
     /// Principal variation following this move.
@@ -88,6 +96,16 @@ pub struct MoveAnnotation {
     /// Classification by score loss (points). A more uniform yardstick than
     /// win-rate across game phases.
     pub score_classification: Classification,
+    /// The network's raw policy for the move played, in `[0, 1]` — exact,
+    /// from the full policy, so present even when the move isn't among
+    /// `top_moves`. Absent when the worker ran without `includePolicy` and the
+    /// move isn't a candidate either.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prior: Option<f32>,
+    /// The human SL network's policy for the move played, under the job's
+    /// `human_profile`. Absent without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub human_prior: Option<f32>,
     /// Top candidate moves for this position.
     pub top_moves: Vec<Candidate>,
 }
@@ -174,6 +192,13 @@ pub struct EngineInfo {
     pub report_perspective: &'static str,
     /// Whether ownership maps were requested.
     pub ownership: bool,
+    /// Whether `ownership_stdev` grids are present.
+    pub ownership_stdev: bool,
+    /// Whether `policy` grids are present.
+    pub policy: bool,
+    /// The human SL network behind `human_policy`, when there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub human_model: Option<String>,
     /// Visits of the screening pass, when two-pass analysis ran: positions
     /// around moves that looked quiet at this depth were not re-searched at
     /// `max_visits` (each candidate's `visits` shows the depth it got).
@@ -213,6 +238,29 @@ pub struct GameAnalysis {
     /// and land on the wrong turn.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ownership: Vec<Vec<i8>>,
+    /// How unsettled each point's ownership is at each turn: the standard
+    /// deviation of ownership across KataGo's search tree, in hundredths
+    /// (`0..=100`). Same shape, turn indexing and all-or-nothing rule as
+    /// `ownership`. A spread, not a side's view, so it needs no flip.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ownership_stdev: Vec<Vec<u8>>,
+    /// The network's raw policy at each turn, for the side to move there:
+    /// `board_size²` points row-major from the top-left (KataGo's trailing
+    /// pass entry is dropped — the played move's `prior` covers a pass),
+    /// encoded `round(255 · sqrt(p))` so small probabilities keep some
+    /// resolution. `0` is an illegal point or `p < ~4e-6`. Decode with
+    /// `(v / 255)²`. Same turn indexing and all-or-nothing rule as `ownership`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub policy: Vec<Vec<u8>>,
+    /// The human SL network's policy at each turn under `human_profile`, in
+    /// `policy`'s shape and encoding. Present only when the job gave a profile
+    /// and the worker has a human model.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub human_policy: Vec<Vec<u8>>,
+    /// The human SL profile `human_policy` and every `human_prior` were
+    /// computed for (`rank_5k`, …). Present exactly when `human_policy` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub human_profile: Option<String>,
 }
 
 /// Running per-player accumulator used while walking the move list; finalized
@@ -433,20 +481,27 @@ fn check_turn_alignment(game: &ParsedGame, by_turn: &HashMap<usize, TurnResponse
     }
 }
 
-/// Ownership at every turn, normalised to Black-positive hundredths.
+/// A per-turn grid read from every turn's response, encoded point by point.
 ///
-/// Returns empty unless *every* turn carries a correctly sized map: consumers
-/// index this by turn number, so a gap would silently shift a swing onto the
-/// neighbouring move. All-or-nothing is the only safe contract.
-fn normalise_ownership(game: &ParsedGame, by_turn: &HashMap<usize, TurnResponse>) -> Vec<Vec<i8>> {
-    let expected = usize::from(game.board_size) * usize::from(game.board_size);
+/// Returns empty unless *every* turn carries a correctly sized array:
+/// consumers index these by turn number, so a gap would silently shift a swing
+/// onto the neighbouring move. All-or-nothing is the only safe contract.
+/// `trailing` is how many entries KataGo appends past the board (the policy's
+/// pass); they're checked for, then dropped.
+fn per_turn_grid<T>(
+    game: &ParsedGame,
+    by_turn: &HashMap<usize, TurnResponse>,
+    name: &str,
+    field: impl Fn(&TurnResponse) -> Option<&Vec<f32>>,
+    trailing: usize,
+    encode: impl Fn(usize, f32) -> T,
+) -> Vec<Vec<T>> {
+    let points = usize::from(game.board_size) * usize::from(game.board_size);
+    let expected = points + trailing;
     let mut per_turn = Vec::with_capacity(game.moves.len() + 1);
 
     for turn in 0..=game.moves.len() {
-        let Some(raw) = by_turn
-            .get(&turn)
-            .and_then(|response| response.ownership.as_ref())
-        else {
+        let Some(raw) = by_turn.get(&turn).and_then(&field) else {
             return Vec::new();
         };
         if raw.len() != expected {
@@ -454,25 +509,15 @@ fn normalise_ownership(game: &ParsedGame, by_turn: &HashMap<usize, TurnResponse>
                 turn,
                 got = raw.len(),
                 expected,
-                "ownership map has the wrong length — dropping ownership for this game"
+                grid = name,
+                "per-turn grid has the wrong length — dropping it for this game"
             );
             return Vec::new();
         }
-
-        // The map is in the reported frame; flip it when that frame isn't
-        // Black. An ownership array carries no `currentPlayer` of its own, so
-        // the side to move comes from the move list.
-        let reporter = REPORT_PERSPECTIVE.reporter(None, side_to_move_at(game, turn));
-        let flip = reporter != Color::Black;
-
         per_turn.push(
             raw.iter()
-                .map(|&cell| {
-                    let signed = if flip { -cell } else { cell };
-                    // Hundredths keep every digit a classifier can use while
-                    // making the array an order of magnitude smaller than f32s.
-                    (signed * 100.0).round().clamp(-100.0, 100.0) as i8
-                })
+                .take(points)
+                .map(|&value| encode(turn, value))
                 .collect(),
         );
     }
@@ -480,8 +525,83 @@ fn normalise_ownership(game: &ParsedGame, by_turn: &HashMap<usize, TurnResponse>
     per_turn
 }
 
+/// Ownership at every turn, normalised to Black-positive hundredths.
+fn normalise_ownership(game: &ParsedGame, by_turn: &HashMap<usize, TurnResponse>) -> Vec<Vec<i8>> {
+    per_turn_grid(
+        game,
+        by_turn,
+        "ownership",
+        |turn| turn.ownership.as_ref(),
+        0,
+        |turn, cell| {
+            // The map is in the reported frame; flip it when that frame isn't
+            // Black. An ownership array carries no `currentPlayer` of its own,
+            // so the side to move comes from the move list.
+            let reporter = REPORT_PERSPECTIVE.reporter(None, side_to_move_at(game, turn));
+            let signed = if reporter == Color::Black {
+                cell
+            } else {
+                -cell
+            };
+            // Hundredths keep every digit a classifier can use while making
+            // the array an order of magnitude smaller than f32s.
+            (signed * 100.0).round().clamp(-100.0, 100.0) as i8
+        },
+    )
+}
+
+/// Ownership spread at every turn, in hundredths.
+fn ownership_stdev_grid(game: &ParsedGame, by_turn: &HashMap<usize, TurnResponse>) -> Vec<Vec<u8>> {
+    per_turn_grid(
+        game,
+        by_turn,
+        "ownership_stdev",
+        |turn| turn.ownership_stdev.as_ref(),
+        0,
+        |_, stdev| (stdev * 100.0).round().clamp(0.0, 100.0) as u8,
+    )
+}
+
+/// A policy probability as one byte: `round(255 · sqrt(p))`, KataGo's `-1`
+/// (illegal) as `0`. The square root spreads the many tiny probabilities over
+/// more of the range than a linear scale would.
+fn encode_policy(prob: f32) -> u8 {
+    if prob <= 0.0 {
+        0
+    } else {
+        (255.0 * prob.sqrt()).round().clamp(0.0, 255.0) as u8
+    }
+}
+
+/// A policy (raw or human) at every turn, encoded per [`encode_policy`].
+fn policy_grid(
+    game: &ParsedGame,
+    by_turn: &HashMap<usize, TurnResponse>,
+    name: &str,
+    field: impl Fn(&TurnResponse) -> Option<&Vec<f32>>,
+) -> Vec<Vec<u8>> {
+    per_turn_grid(game, by_turn, name, field, 1, |_, prob| encode_policy(prob))
+}
+
+/// A move's probability in one turn's full policy array (pass included).
+fn policy_at(policy: Option<&Vec<f32>>, mv: &str, board_size: u8) -> Option<f32> {
+    let expected = usize::from(board_size) * usize::from(board_size) + 1;
+    let policy = policy.filter(|policy| policy.len() == expected)?;
+    sgf::policy_index(mv, board_size)
+        .and_then(|index| policy.get(index))
+        .map(|&prob| prob.max(0.0))
+}
+
 /// Assemble the analysis from the parsed game and KataGo's per-turn results.
-pub fn assemble(game: &ParsedGame, turns: Vec<TurnResponse>, cfg: &EngineConfig) -> GameAnalysis {
+///
+/// `human_profile` is the profile the query carried, if any; it's recorded
+/// only when the human policy actually came back.
+pub fn assemble(
+    game: &ParsedGame,
+    turns: Vec<TurnResponse>,
+    cfg: &EngineConfig,
+    human_profile: Option<&str>,
+) -> GameAnalysis {
     let by_turn: HashMap<usize, TurnResponse> = turns
         .into_iter()
         .map(|turn| (turn.turn_number, turn))
@@ -513,8 +633,8 @@ pub fn assemble(game: &ParsedGame, turns: Vec<TurnResponse>, cfg: &EngineConfig)
         let score_loss = (best_score - resulting_score).max(0.0);
         let score_classification = classify_score(score_loss);
 
-        let top_moves = by_turn
-            .get(&index)
+        let turn = by_turn.get(&index);
+        let top_moves: Vec<Candidate> = turn
             .map(|turn| {
                 let mut infos: Vec<&_> = turn.move_infos.iter().collect();
                 infos.sort_by_key(|info| info.order);
@@ -529,6 +649,7 @@ pub fn assemble(game: &ParsedGame, turns: Vec<TurnResponse>, cfg: &EngineConfig)
                             winrate: eval.winrate,
                             score_lead: eval.score_lead,
                             prior: info.prior,
+                            human_prior: info.human_prior,
                             visits: info.visits,
                             pv: info.pv.clone(),
                         }
@@ -536,6 +657,23 @@ pub fn assemble(game: &ParsedGame, turns: Vec<TurnResponse>, cfg: &EngineConfig)
                     .collect()
             })
             .unwrap_or_default();
+
+        // The played move's priors come from the full arrays, which cover
+        // every move; a candidate's own figures are the fallback when the
+        // worker didn't return them.
+        let played = top_moves.iter().find(|candidate| candidate.mv == *mv);
+        let prior = policy_at(
+            turn.and_then(|turn| turn.policy.as_ref()),
+            mv,
+            game.board_size,
+        )
+        .or_else(|| played.map(|candidate| candidate.prior));
+        let human_prior = policy_at(
+            turn.and_then(|turn| turn.human_policy.as_ref()),
+            mv,
+            game.board_size,
+        )
+        .or_else(|| played.and_then(|candidate| candidate.human_prior));
 
         let accum = match color {
             Color::Black => &mut black,
@@ -559,11 +697,21 @@ pub fn assemble(game: &ParsedGame, turns: Vec<TurnResponse>, cfg: &EngineConfig)
             score_lead: best_score,
             score_loss,
             score_classification,
+            prior,
+            human_prior,
             top_moves,
         });
     }
 
     let ownership = normalise_ownership(game, &by_turn);
+    let ownership_stdev = ownership_stdev_grid(game, &by_turn);
+    let policy = policy_grid(game, &by_turn, "policy", |turn| turn.policy.as_ref());
+    let human_policy = policy_grid(game, &by_turn, "human_policy", |turn| {
+        turn.human_policy.as_ref()
+    });
+    let human_profile = human_profile
+        .filter(|_| !human_policy.is_empty())
+        .map(str::to_owned);
 
     GameAnalysis {
         board_size: game.board_size,
@@ -584,9 +732,16 @@ pub fn assemble(game: &ParsedGame, turns: Vec<TurnResponse>, cfg: &EngineConfig)
             top_k: cfg.top_k,
             report_perspective: REPORT_PERSPECTIVE.as_katago_setting(),
             ownership: !ownership.is_empty(),
+            ownership_stdev: !ownership_stdev.is_empty(),
+            policy: !policy.is_empty(),
+            human_model: human_profile.as_ref().map(|_| cfg.human_model.clone()),
             screen_visits: cfg.two_pass().then_some(cfg.screen_visits),
         },
         ownership,
+        ownership_stdev,
+        policy,
+        human_policy,
+        human_profile,
     }
 }
 
@@ -626,6 +781,7 @@ mod tests {
             top_k,
             max_visits: 100,
             model: "test-model".to_owned(),
+            human_model: "test-model-human".to_owned(),
             ..EngineConfig::default()
         }
     }
@@ -674,7 +830,7 @@ mod tests {
             })).unwrap(),
         ];
 
-        let analysis = assemble(&game_one_move(), turns, &cfg(5));
+        let analysis = assemble(&game_one_move(), turns, &cfg(5), None);
         assert_eq!(analysis.moves.len(), 1);
         let mv = &analysis.moves[0];
         assert_eq!(mv.color, Color::Black);
@@ -693,6 +849,204 @@ mod tests {
         assert_eq!(analysis.report.black.by_score.mistake, 1);
         assert_eq!(mv.top_moves.len(), 1);
         assert_eq!(mv.top_moves[0].mv, "D4");
+    }
+
+    /// [`tiny_game`] turns carrying every v3 field: stdev, the raw policy and
+    /// the human policy (each with KataGo's trailing pass entry), and one
+    /// candidate per turn with a human prior.
+    fn tiny_turns_v3() -> Vec<TurnResponse> {
+        let players = ["B", "W", "B"];
+        (0..3)
+            .map(|turn| {
+                serde_json::from_value(serde_json::json!({
+                    "id": "q0",
+                    "turnNumber": turn,
+                    "rootInfo": {"winrate": 0.5, "scoreLead": 0.0, "currentPlayer": players[turn]},
+                    "moveInfos": [{
+                        "move": "B2", "winrate": 0.5, "scoreLead": 0.0,
+                        "prior": 0.25, "humanPrior": 0.5, "visits": 10, "order": 0
+                    }],
+                    "ownership": [1.0, 0.0, 0.0, -1.0],
+                    "ownershipStdev": [0.0, 0.123, 0.5, 1.0],
+                    // A2, B2, A1, B1, pass. A2 is illegal from turn 1 on.
+                    "policy": if turn == 0 {
+                        serde_json::json!([0.64, 0.25, 0.01, 0.0, 0.1])
+                    } else {
+                        serde_json::json!([-1.0, 0.25, 0.01, 0.64, 0.1])
+                    },
+                    "humanPolicy": [0.0, 0.5, 0.25, 0.04, 0.21],
+                }))
+                .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn v3_grids_are_encoded_per_turn() {
+        let analysis = assemble(&tiny_game(), tiny_turns_v3(), &cfg(5), Some("rank_5k"));
+        assert_eq!(analysis.payload_version, 3);
+
+        assert_eq!(analysis.ownership_stdev.len(), 3, "one grid per turn");
+        assert_eq!(analysis.ownership_stdev[0], vec![0, 12, 50, 100]);
+
+        // round(255·√p), the pass entry dropped, illegal (-1) as 0.
+        assert_eq!(analysis.policy.len(), 3);
+        assert_eq!(analysis.policy[0], vec![204, 128, 26, 0]);
+        assert_eq!(analysis.policy[1], vec![0, 128, 26, 204]);
+        assert_eq!(analysis.human_policy[2], vec![0, 180, 128, 51]);
+        assert_eq!(analysis.human_profile.as_deref(), Some("rank_5k"));
+
+        assert!(analysis.engine.ownership_stdev && analysis.engine.policy);
+        assert_eq!(
+            analysis.engine.human_model.as_deref(),
+            Some("test-model-human")
+        );
+    }
+
+    /// The played move's priors come from the full arrays, so a move outside
+    /// the candidate list still gets them; the candidates keep their own.
+    #[test]
+    fn the_played_move_gets_its_priors_from_the_full_policy() {
+        let analysis = assemble(&tiny_game(), tiny_turns_v3(), &cfg(5), Some("rank_5k"));
+        // Move 1, Black A2 — not the candidate (B2): straight from the arrays.
+        let first = &analysis.moves[0];
+        assert_eq!(first.prior, Some(0.64));
+        assert_eq!(first.human_prior, Some(0.0));
+        // Move 2, White B1.
+        assert_eq!(analysis.moves[1].prior, Some(0.64));
+        assert_eq!(analysis.moves[1].human_prior, Some(0.04));
+        assert_eq!(first.top_moves[0].human_prior, Some(0.5));
+
+        // Without the arrays, a played move that is a candidate keeps the
+        // candidate's figures, and one that isn't has none.
+        let mut turns = tiny_turns_v3();
+        for turn in &mut turns {
+            turn.policy = None;
+            turn.human_policy = None;
+            turn.move_infos[0].mv = "A2".to_owned();
+        }
+        let analysis = assemble(&tiny_game(), turns, &cfg(5), Some("rank_5k"));
+        assert_eq!(analysis.moves[0].prior, Some(0.25));
+        assert_eq!(analysis.moves[0].human_prior, Some(0.5));
+        assert_eq!(analysis.moves[1].prior, None);
+        assert!(analysis.policy.is_empty() && analysis.human_policy.is_empty());
+        assert_eq!(analysis.human_profile, None, "no human policy, no profile");
+    }
+
+    /// Like ownership, a grid with a gap or a wrong length is dropped whole —
+    /// and one grid going missing leaves the others alone.
+    #[test]
+    fn each_v3_grid_is_all_or_nothing_on_its_own() {
+        let mut turns = tiny_turns_v3();
+        turns[1].ownership_stdev = None;
+        turns[2].policy = Some(vec![0.5, 0.5, 0.0, 0.0]); // no pass entry
+        let analysis = assemble(&tiny_game(), turns, &cfg(5), Some("rank_5k"));
+        assert!(analysis.ownership_stdev.is_empty());
+        assert!(!analysis.engine.ownership_stdev);
+        assert!(analysis.policy.is_empty());
+        assert_eq!(analysis.human_policy.len(), 3);
+        assert_eq!(analysis.ownership.len(), 3);
+    }
+
+    /// Without a profile there are no human fields at all, not empty ones.
+    #[test]
+    fn no_profile_no_human_fields() {
+        let mut turns = tiny_turns_v3();
+        for turn in &mut turns {
+            turn.human_policy = None;
+            turn.move_infos[0].human_prior = None;
+        }
+        let analysis = assemble(&tiny_game(), turns, &cfg(5), None);
+        let json = serde_json::to_value(&analysis).unwrap();
+        assert!(json.get("human_policy").is_none());
+        assert!(json.get("human_profile").is_none());
+        assert!(json["engine"].get("human_model").is_none());
+        assert!(json["moves"][0].get("human_prior").is_none());
+        assert!(
+            json["moves"][0]["top_moves"][0]
+                .get("human_prior")
+                .is_none()
+        );
+        assert!(json["moves"][0].get("prior").is_some());
+    }
+
+    /// The exact JSON names and shapes a v3 payload ships, and that a reader
+    /// written for v2 — the shape `baduk_review`'s `katago-sdk` mirrors, with
+    /// no `deny_unknown_fields` — still reads every field it knows from it.
+    #[test]
+    fn a_v2_reader_reads_a_v3_payload() {
+        #[derive(serde::Deserialize)]
+        struct CandidateV2 {
+            mv: String,
+            prior: f32,
+            visits: u32,
+            #[serde(default)]
+            pv: Vec<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct MoveV2 {
+            move_number: usize,
+            mv: String,
+            score_loss: f32,
+            #[serde(default)]
+            top_moves: Vec<CandidateV2>,
+        }
+        #[derive(serde::Deserialize)]
+        struct EngineV2 {
+            name: String,
+            max_visits: u32,
+            #[serde(default)]
+            ownership: bool,
+        }
+        #[derive(serde::Deserialize)]
+        struct AnalysisV2 {
+            board_size: u8,
+            moves: Vec<MoveV2>,
+            report: serde_json::Value,
+            payload_version: u32,
+            #[serde(default)]
+            engine: Option<EngineV2>,
+            #[serde(default)]
+            ownership: Vec<Vec<i8>>,
+        }
+
+        let v3 = assemble(&tiny_game(), tiny_turns_v3(), &cfg(5), Some("rank_5k"));
+        let json = serde_json::to_value(&v3).unwrap();
+
+        // The v3 additions, by their wire names and shapes.
+        let cells = 4;
+        for grid in ["ownership_stdev", "policy", "human_policy"] {
+            let turns = json[grid].as_array().unwrap();
+            assert_eq!(turns.len(), 3, "{grid}: one per turn");
+            assert!(
+                turns
+                    .iter()
+                    .all(|turn| turn.as_array().unwrap().len() == cells)
+            );
+        }
+        assert_eq!(json["human_profile"], "rank_5k");
+        assert!(json["moves"][0]["prior"].is_number());
+        assert!(json["moves"][0]["human_prior"].is_number());
+        assert!(json["moves"][0]["top_moves"][0]["human_prior"].is_number());
+        assert_eq!(json["engine"]["ownership_stdev"], true);
+        assert_eq!(json["engine"]["policy"], true);
+
+        let v2: AnalysisV2 = serde_json::from_value(json).expect("a v2 reader reads v3");
+        assert_eq!(v2.payload_version, 3);
+        assert_eq!(v2.board_size, 2);
+        assert_eq!(v2.ownership, v3.ownership);
+        assert_eq!(v2.moves.len(), 2);
+        assert_eq!(v2.moves[1].move_number, 2);
+        assert_eq!(v2.moves[1].mv, "B1");
+        assert!(v2.moves[0].score_loss >= 0.0);
+        assert_eq!(v2.moves[0].top_moves[0].mv, "B2");
+        assert!((v2.moves[0].top_moves[0].prior - 0.25).abs() < 1e-6);
+        assert_eq!(v2.moves[0].top_moves[0].visits, 10);
+        assert!(v2.moves[0].top_moves[0].pv.is_empty());
+        assert!(v2.report.get("black").is_some());
+        let engine = v2.engine.unwrap();
+        assert_eq!((engine.name.as_str(), engine.max_visits), ("katago", 100));
+        assert!(engine.ownership);
     }
 
     #[test]
@@ -724,7 +1078,7 @@ mod tests {
     #[test]
     fn a_move_never_beats_the_best_line_available_to_it() {
         let turns = tiny_turns([None, None, None]);
-        let analysis = assemble(&tiny_game(), turns, &cfg(5));
+        let analysis = assemble(&tiny_game(), turns, &cfg(5), None);
 
         for mv in &analysis.moves {
             assert!(
@@ -758,7 +1112,7 @@ mod tests {
             .unwrap(),
         ];
 
-        let analysis = assemble(&game_one_move(), turns, &cfg(5));
+        let analysis = assemble(&game_one_move(), turns, &cfg(5), None);
         let mv = &analysis.moves[0];
 
         assert!(
@@ -781,7 +1135,7 @@ mod tests {
             Some(vec![1.0, 0.5, -0.5, -1.0]),
             Some(vec![0.0, 0.0, 0.0, 0.0]),
         ]);
-        let analysis = assemble(&tiny_game(), turns, &cfg(5));
+        let analysis = assemble(&tiny_game(), turns, &cfg(5), None);
 
         assert_eq!(analysis.ownership.len(), 3, "one map per turn");
         assert_eq!(analysis.ownership[0], vec![100, 50, -50, -100]);
@@ -804,7 +1158,7 @@ mod tests {
             None,
             Some(vec![0.0, 0.0, 0.0, 0.0]),
         ]);
-        let analysis = assemble(&tiny_game(), missing, &cfg(5));
+        let analysis = assemble(&tiny_game(), missing, &cfg(5), None);
         assert!(analysis.ownership.is_empty());
         assert!(!analysis.engine.ownership);
 
@@ -813,7 +1167,7 @@ mod tests {
             Some(vec![1.0, 0.0]),
             Some(vec![0.0, 0.0, 0.0, 0.0]),
         ]);
-        let analysis = assemble(&tiny_game(), short, &cfg(5));
+        let analysis = assemble(&tiny_game(), short, &cfg(5), None);
         assert!(analysis.ownership.is_empty());
     }
 
@@ -848,7 +1202,12 @@ mod tests {
     /// different visit counts are never silently compared.
     #[test]
     fn the_payload_records_what_produced_it() {
-        let analysis = assemble(&game_one_move(), tiny_turns([None, None, None]), &cfg(7));
+        let analysis = assemble(
+            &game_one_move(),
+            tiny_turns([None, None, None]),
+            &cfg(7),
+            None,
+        );
         assert_eq!(analysis.engine.name, "katago");
         assert_eq!(analysis.engine.model, "test-model");
         assert_eq!(analysis.engine.max_visits, 100);
@@ -920,14 +1279,14 @@ mod tests {
     #[test]
     fn the_payload_records_the_screening_depth_only_when_it_ran() {
         let turns = tiny_turns([None, None, None]);
-        let single = assemble(&tiny_game(), turns.clone(), &cfg(5));
+        let single = assemble(&tiny_game(), turns.clone(), &cfg(5), None);
         assert_eq!(single.engine.screen_visits, None);
 
         let two_pass = EngineConfig {
             screen_visits: 16,
             ..cfg(5)
         };
-        let analysis = assemble(&tiny_game(), turns, &two_pass);
+        let analysis = assemble(&tiny_game(), turns, &two_pass, None);
         assert_eq!(analysis.engine.screen_visits, Some(16));
     }
 }

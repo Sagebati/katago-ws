@@ -155,7 +155,7 @@ pub async fn run(
     {
         let started = Instant::now();
         engine
-            .analyze(sgf)
+            .analyze(sgf, None)
             .await
             .map_err(|err| format!("warm-up game {name} failed: {err}"))?;
         tracing::info!(
@@ -183,7 +183,7 @@ pub async fn run(
             async move {
                 let game_started = Instant::now();
                 let analysis = engine
-                    .analyze(sgf)
+                    .analyze(sgf, None)
                     .await
                     .map_err(|err| format!("{name}: {err}"))?;
                 Ok(game_run(name, round, game_started.elapsed(), &analysis))

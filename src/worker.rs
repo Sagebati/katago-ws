@@ -40,6 +40,7 @@ use crate::queue::{self, JobMessage};
 pub trait Executor: Send + Sync + 'static {
     /// Analyze `sgf` for `job_id`, yielding the result JSON or an error (a failed
     /// analysis is recorded as a non-terminal attempt and left for redelivery).
+    /// `human_profile` is the job's human SL profile, if it gave one.
     ///
     /// `sgf` is taken **by value**: the only owner of the SGF at this point is the
     /// dequeued message, which `handle` moves straight in. The local executor just
@@ -49,6 +50,7 @@ pub trait Executor: Send + Sync + 'static {
         &self,
         job_id: Uuid,
         sgf: String,
+        human_profile: Option<String>,
     ) -> impl std::future::Future<Output = AppResult<Json>> + Send;
 }
 
@@ -67,8 +69,13 @@ impl LocalExecutor {
 }
 
 impl Executor for LocalExecutor {
-    async fn analyze(&self, _job_id: Uuid, sgf: String) -> AppResult<Json> {
-        let analysis = self.engine.analyze(&sgf).await?;
+    async fn analyze(
+        &self,
+        _job_id: Uuid,
+        sgf: String,
+        human_profile: Option<String>,
+    ) -> AppResult<Json> {
+        let analysis = self.engine.analyze(&sgf, human_profile.as_deref()).await?;
         serde_json::to_value(&analysis).map_err(|err| AppError::Internal(err.to_string()))
     }
 }
@@ -182,7 +189,9 @@ async fn handle<E: Executor>(
     // Move the SGF out of the message (we've already copied job_id/msg_id/read_ct
     // above and don't touch `msg` again) — the remote executor then ships it onto
     // the socket without re-copying it.
-    let result = executor.analyze(job_id, msg.message.sgf).await;
+    let result = executor
+        .analyze(job_id, msg.message.sgf, msg.message.human_profile)
+        .await;
     let elapsed = started.elapsed().as_secs_f64();
     drop(heartbeat); // stop re-arming the lock now that analysis is done
 

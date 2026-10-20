@@ -7,3 +7,6 @@
 
 # Local benchmark workspace (KataGo binary, models, SGF corpus, results)
 /bench/
+
+# KataGo writes a log per run (logDir in its analysis config).
+analysis_logs/

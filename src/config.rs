@@ -17,8 +17,10 @@ fn default_model() -> String {
 fn default_max_visits() -> u32 {
     100
 }
+/// Long enough for a whole local sequence (a joseki, a fight) rather than its
+/// first few moves; KataGo's own default.
 fn default_pv_len() -> u32 {
-    8
+    15
 }
 /// The candidates are already searched by the time they're reported, so a
 /// larger list costs payload size only, not engine time. Ten rather than five
@@ -87,6 +89,19 @@ pub struct EngineConfig {
     pub analysis_pv_len: u32,
     /// Whether to request ownership maps.
     pub include_ownership: bool,
+    /// Whether to request the per-point standard deviation of ownership across
+    /// the search tree (`includeOwnershipStdev`): how settled each point is.
+    /// No extra search, only payload.
+    pub include_ownership_stdev: bool,
+    /// Whether to request the raw policy (`includePolicy`): the network's
+    /// prior over every move before any search, and — with a human model and a
+    /// job's `human_profile` — the human policy. No extra search, only payload.
+    pub include_policy: bool,
+    /// KataGo human SL network (`-human-model`, e.g. `b18c384nbt-humanv0.bin.gz`).
+    /// Empty (the default) loads none: jobs asking for a `human_profile` get
+    /// no human policy. Loaded beside the main model — roughly another 100 MB
+    /// of VRAM — and evaluated once per analysed position, not per visit.
+    pub human_model: String,
     /// Number of candidate moves to report per position.
     pub top_k: usize,
     /// Komi to assume when an SGF omits it.
@@ -196,6 +211,9 @@ impl Default for EngineConfig {
             // roughly doubles KataGo's memory use and costs a little speed —
             // turn it off on a memory-constrained worker.
             include_ownership: true,
+            include_ownership_stdev: true,
+            include_policy: true,
+            human_model: String::new(),
             top_k: default_top_k(),
             default_komi: default_komi(),
             default_board_size: default_board_size(),

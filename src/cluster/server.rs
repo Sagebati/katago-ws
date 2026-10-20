@@ -221,14 +221,23 @@ struct RemoteExecutor {
 }
 
 impl Executor for RemoteExecutor {
-    async fn analyze(&self, job_id: Uuid, sgf: String) -> AppResult<Json> {
+    async fn analyze(
+        &self,
+        job_id: Uuid,
+        sgf: String,
+        human_profile: Option<String>,
+    ) -> AppResult<Json> {
         let (tx, rx) = oneshot::channel();
         // Register the waiter before sending, so a fast result can't race us.
         self.pending.lock().await.insert(job_id, tx);
 
         // `sgf` is owned (moved out of the dequeued message) → straight onto the
         // wire, no copy.
-        let request = JobRequest { job_id, sgf };
+        let request = JobRequest {
+            job_id,
+            sgf,
+            human_profile,
+        };
         if self.out_tx.send(request).await.is_err() {
             self.pending.lock().await.remove(&job_id);
             return Err(AppError::Queue(
@@ -301,12 +310,18 @@ mod tests {
         let job = JobRequest {
             job_id: Uuid::nil(),
             sgf: "(;GM[1])".to_owned(),
+            human_profile: Some("rank_5k".to_owned()),
         };
         let wire = serde_json::to_string(&job).unwrap();
-        assert_eq!(
-            serde_json::from_str::<JobRequest>(&wire).unwrap().sgf,
-            "(;GM[1])"
-        );
+        let read = serde_json::from_str::<JobRequest>(&wire).unwrap();
+        assert_eq!(read.sgf, "(;GM[1])");
+        assert_eq!(read.human_profile.as_deref(), Some("rank_5k"));
+        // A request from an orchestrator that predates profiles still reads.
+        let old = serde_json::from_str::<JobRequest>(
+            r#"{"job_id":"00000000-0000-0000-0000-000000000000","sgf":"(;GM[1])"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.human_profile, None);
 
         let result = serde_json::to_string(&ClientMsg::Result {
             job_id: Uuid::nil(),

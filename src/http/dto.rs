@@ -33,6 +33,18 @@ pub struct StatusQuery {
     pub wait: Option<u64>,
 }
 
+/// Query parameters for `POST /analyse`.
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct SubmitQuery {
+    /// Human SL profile to report the human policy for: `rank_20k` … `rank_9d`,
+    /// `rank_<B>_<W>` (Black's and White's ranks), `preaz_…` (the same, 2016
+    /// opening style) or `proyear_1800` … `proyear_2023`. The payload then
+    /// carries `human_policy`, `human_profile` and `human_prior`s — when the
+    /// worker has a human model; without one the job runs without them.
+    /// Omit for none. An unknown profile is a 400.
+    pub human_profile: Option<String>,
+}
+
 /// Response to a successful `POST /analyse`.
 #[derive(Serialize, JsonSchema)]
 pub struct SubmitResponse {
@@ -137,8 +149,36 @@ pub struct WorkersResponse {
 /// Body of `POST /analyse/batch`.
 #[derive(Deserialize, JsonSchema)]
 pub struct BatchSubmitRequest {
-    /// The SGFs to analyse, at most [`MAX_BATCH`](crate::http::handlers::MAX_BATCH).
-    pub sgfs: Vec<String>,
+    /// The games to analyse, at most [`MAX_BATCH`](crate::http::handlers::MAX_BATCH):
+    /// each a bare SGF string, or an object with options.
+    pub sgfs: Vec<BatchGame>,
+}
+
+/// One game in a batch: a bare SGF, or the SGF with per-game options.
+#[derive(Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum BatchGame {
+    /// The SGF alone.
+    Sgf(String),
+    /// The SGF and how to analyse it.
+    WithOptions {
+        /// The SGF.
+        sgf: String,
+        /// Human SL profile, as for `POST /analyse?human_profile=`. An unknown
+        /// profile refuses this game (its `error`), not the batch.
+        #[serde(default)]
+        human_profile: Option<String>,
+    },
+}
+
+impl BatchGame {
+    /// The SGF and the (unvalidated) human profile.
+    pub fn into_parts(self) -> (String, Option<String>) {
+        match self {
+            Self::Sgf(sgf) => (sgf, None),
+            Self::WithOptions { sgf, human_profile } => (sgf, human_profile),
+        }
+    }
 }
 
 /// One input's outcome in a batch, at the same index as its SGF. Exactly one of

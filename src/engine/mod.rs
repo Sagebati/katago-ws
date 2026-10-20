@@ -3,6 +3,7 @@
 
 pub mod annotate;
 pub mod autotune;
+pub mod human;
 pub mod katago;
 pub mod sgf;
 
@@ -82,7 +83,7 @@ impl AnalysisEngine {
         let turns: Vec<usize> = turns.collect();
         let done = self
             .katago
-            .analyze(game, &self.cfg, turns, self.cfg.max_visits, 0)
+            .analyze(game, &self.cfg, turns, self.cfg.max_visits, 0, None)
             .await?;
         Ok(done.len())
     }
@@ -93,16 +94,38 @@ impl AnalysisEngine {
     /// [`EngineConfig::two_pass`] — a cheap screening pass over every turn and
     /// a full-depth pass over only the turns around moves that swing (see
     /// [`annotate::turns_to_refine`]).
+    ///
+    /// `human_profile` (`rank_5k`, …; see [`human`]) adds the human SL
+    /// network's policy to the payload when this engine has a human model. On
+    /// one without, the profile is dropped with a warning rather than failing
+    /// the job: KataGo would reject every query that carried it.
     #[tracing::instrument(name = "katago.analyze", skip_all, fields(moves, refined))]
-    pub async fn analyze(&self, sgf: &str) -> AppResult<GameAnalysis> {
+    pub async fn analyze(&self, sgf: &str, human_profile: Option<&str>) -> AppResult<GameAnalysis> {
         let game = sgf::parse(sgf, self.cfg.default_board_size, self.cfg.default_komi)?;
         let span = tracing::Span::current();
         span.record("moves", game.moves.len());
+        let human_profile = human_profile.filter(|profile| {
+            let loaded = !self.cfg.human_model.is_empty();
+            if !loaded {
+                tracing::warn!(
+                    profile,
+                    "job asked for a human profile but no [engine] human_model is loaded; \
+                     analysing without human policy"
+                );
+            }
+            loaded
+        });
         let all_turns: Vec<usize> = (0..=game.moves.len()).collect();
 
         let turns = if self.cfg.two_pass() {
             let screened = self
-                .pass(Pass::Screen, &game, all_turns, self.cfg.screen_visits)
+                .pass(
+                    Pass::Screen,
+                    &game,
+                    all_turns,
+                    self.cfg.screen_visits,
+                    human_profile,
+                )
                 .await?;
             let refine = annotate::turns_to_refine(&game, &screened, &self.cfg);
             span.record("refined", refine.len());
@@ -115,14 +138,21 @@ impl AnalysisEngine {
                     &game,
                     refine.into_iter().collect(),
                     self.cfg.max_visits,
+                    human_profile,
                 )
                 .await?;
             merge_turns(screened, refined)
         } else {
-            self.pass(Pass::Full, &game, all_turns, self.cfg.max_visits)
-                .await?
+            self.pass(
+                Pass::Full,
+                &game,
+                all_turns,
+                self.cfg.max_visits,
+                human_profile,
+            )
+            .await?
         };
-        Ok(annotate::assemble(&game, turns, &self.cfg))
+        Ok(annotate::assemble(&game, turns, &self.cfg, human_profile))
     }
 
     /// One KataGo query over `turns`, traced and counted as `pass`.
@@ -132,12 +162,20 @@ impl AnalysisEngine {
         game: &ParsedGame,
         turns: Vec<usize>,
         visits: u32,
+        human_profile: Option<&str>,
     ) -> AppResult<Vec<TurnResponse>> {
         let positions = turns.len();
         let span = tracing::info_span!("katago.pass", pass = pass.as_str(), positions, visits);
         let result = self
             .katago
-            .analyze(game, &self.cfg, turns, visits, pass.priority())
+            .analyze(
+                game,
+                &self.cfg,
+                turns,
+                visits,
+                pass.priority(),
+                human_profile,
+            )
             .instrument(span)
             .await?;
         crate::metrics::metrics().positions_analyzed(pass.as_str(), positions as u64);
@@ -282,6 +320,7 @@ impl<S: State> Plugin<S> for KataGoEnginePlugin {
             binary = %cfg.binary,
             model = %cfg.model,
             max_visits = cfg.max_visits,
+            human_model = (!cfg.human_model.is_empty()).then_some(cfg.human_model.as_str()),
             screen_visits = cfg.two_pass().then_some(cfg.screen_visits),
             overrides = cfg.katago_overrides().as_deref().unwrap_or("none"),
             "launching KataGo analysis engine"

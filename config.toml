@@ -52,9 +52,14 @@ max_connections = 10
 binary = "katago"
 config = "analysis.cfg"
 model = "model.bin.gz"
-# Analysis tuning (max_visits, analysis_pv_len, include_ownership, top_k,
-# default_komi, default_board_size, request_timeout_secs) defaults to the values
-# in `src/config.rs`; override any of them here or via KATAGO_WS_ENGINE__* env vars.
+# Analysis tuning (max_visits, analysis_pv_len, include_ownership,
+# include_ownership_stdev, include_policy, top_k, default_komi,
+# default_board_size, request_timeout_secs) defaults to the values in
+# `src/config.rs`; override any of them here or via KATAGO_WS_ENGINE__* env vars.
+#
+# Human SL network (`-human-model`): jobs submitted with a `human_profile` then
+# get the human policy. Empty = none. See README "Human policy".
+# human_model = "b18c384nbt-humanv0.bin.gz"
 #
 # Throughput (see README "Throughput tuning"). Passed to KataGo as
 # `-override-config`; 0 / empty keeps analysis.cfg's value.

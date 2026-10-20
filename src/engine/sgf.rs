@@ -100,6 +100,22 @@ fn move_to_gtp(mv: Move, board_size: u8) -> AppResult<String> {
     }
 }
 
+/// Where a GTP move (as [`parse`] emits them) sits in KataGo's policy array:
+/// the board row-major from the top-left (A19 → T1), then pass at
+/// `board_size²`. `None` for anything off the board or unreadable.
+pub fn policy_index(mv: &str, board_size: u8) -> Option<usize> {
+    let size = usize::from(board_size);
+    if mv.eq_ignore_ascii_case("pass") {
+        return Some(size * size);
+    }
+    let (&letter, row) = mv.as_bytes().split_first()?;
+    let col = GTP_LETTERS
+        .iter()
+        .position(|&gtp| gtp == letter.to_ascii_uppercase())?;
+    let row: usize = std::str::from_utf8(row).ok()?.parse().ok()?;
+    (col < size && (1..=size).contains(&row)).then(|| (size - row) * size + col)
+}
+
 /// Check that an SGF would parse into a replayable [`ParsedGame`], without
 /// keeping the result. Used at submit time so a malformed game is rejected up
 /// front instead of failing in the worker. Board size and komi defaults don't
@@ -224,6 +240,23 @@ pub fn parse(sgf: &str, default_size: u8, default_komi: f32) -> AppResult<Parsed
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The inverse of the row flip in [`to_gtp`], checked at the corners and
+    /// across the skipped `I`.
+    #[test]
+    fn gtp_moves_map_onto_the_policy_array() {
+        assert_eq!(policy_index("A19", 19), Some(0));
+        assert_eq!(policy_index("T19", 19), Some(18));
+        assert_eq!(policy_index("A1", 19), Some(342));
+        assert_eq!(policy_index("T1", 19), Some(360));
+        assert_eq!(policy_index("J19", 19), Some(8), "J is the ninth column");
+        assert_eq!(policy_index("pass", 19), Some(361));
+        assert_eq!(policy_index("E5", 9), Some(40), "tengen on 9x9");
+        assert_eq!(policy_index("I5", 9), None);
+        assert_eq!(policy_index("K5", 9), None, "off a 9x9 board");
+        assert_eq!(policy_index("A0", 9), None);
+        assert_eq!(policy_index("", 9), None);
+    }
 
     #[test]
     fn parses_metadata_and_gtp_moves() {

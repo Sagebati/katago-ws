@@ -188,6 +188,11 @@ pub struct MoveInfo {
     /// Visits to this move.
     #[serde(default)]
     pub visits: u32,
+    /// The human SL network's prior for this move, under the query's
+    /// `humanSLProfile`. Present only when a human model is loaded and a
+    /// profile was given.
+    #[serde(default)]
+    pub human_prior: Option<f32>,
     /// Rank among candidates (0 = best).
     #[serde(default)]
     pub order: u32,
@@ -235,6 +240,22 @@ pub struct TurnResponse {
     /// [`Perspective`] — so it needs the same rotation as everything else.
     #[serde(default)]
     pub ownership: Option<Vec<f32>>,
+    /// Standard deviation of ownership across the search tree, present only
+    /// when `includeOwnershipStdev` is on. Same layout as `ownership`, values
+    /// in `[0, 1]` — a spread, so it has no perspective to rotate.
+    #[serde(default)]
+    pub ownership_stdev: Option<Vec<f32>>,
+    /// The network's raw policy, present only when `includePolicy` is on.
+    /// Length `boardYSize * boardXSize + 1`: the board row-major from the
+    /// top-left, then pass; `-1` marks an illegal move. Always the side to
+    /// move's — a policy has no other frame.
+    #[serde(default)]
+    pub policy: Option<Vec<f32>>,
+    /// The human SL network's policy under the query's `humanSLProfile`, in
+    /// `policy`'s layout. Present only with `includePolicy`, a human model and
+    /// a profile.
+    #[serde(default)]
+    pub human_policy: Option<Vec<f32>>,
 }
 
 /// One in-flight query: how many turn responses to expect, what's collected so
@@ -265,6 +286,8 @@ struct AnalysisQuery {
     #[serde(rename = "analysisPVLen")]
     analysis_pv_len: u32,
     include_ownership: bool,
+    include_ownership_stdev: bool,
+    include_policy: bool,
     /// Scheduling priority within KataGo's queue (higher runs first).
     priority: i32,
     /// Per-query settings that override the analysis config file.
@@ -280,12 +303,18 @@ struct AnalysisQuery {
 #[serde(rename_all = "camelCase")]
 struct OverrideSettings {
     report_analysis_winrates_as: &'static str,
+    /// Whose play the human SL network imitates (`rank_5k`, …). It belongs
+    /// here: KataGo ignores it on the outer query object. Sent only with a
+    /// human model loaded — KataGo rejects the whole query otherwise.
+    #[serde(rename = "humanSLProfile", skip_serializing_if = "Option::is_none")]
+    human_sl_profile: Option<String>,
 }
 
-impl Default for OverrideSettings {
-    fn default() -> Self {
+impl OverrideSettings {
+    fn new(human_profile: Option<&str>) -> Self {
         Self {
             report_analysis_winrates_as: REPORT_PERSPECTIVE.as_katago_setting(),
+            human_sl_profile: human_profile.map(str::to_owned),
         }
     }
 }
@@ -366,6 +395,10 @@ impl KataGo {
             "-model".to_owned(),
             cfg.model.clone(),
         ];
+        if !cfg.human_model.is_empty() {
+            args.push("-human-model".to_owned());
+            args.push(cfg.human_model.clone());
+        }
         if let Some(overrides) = cfg.katago_overrides() {
             args.push("-override-config".to_owned());
             args.push(overrides);
@@ -448,6 +481,8 @@ impl KataGo {
     ///
     /// `priority` orders this query against others in KataGo's queue (higher
     /// first; turns of equal priority run in submission order).
+    /// `human_profile` must only be given when `cfg.human_model` is loaded:
+    /// KataGo fails the whole query otherwise.
     pub async fn analyze(
         &self,
         game: &ParsedGame,
@@ -455,6 +490,7 @@ impl KataGo {
         turns: Vec<usize>,
         max_visits: u32,
         priority: i32,
+        human_profile: Option<&str>,
     ) -> AppResult<Vec<TurnResponse>> {
         let expected = turns.len();
         if expected == 0 {
@@ -474,8 +510,10 @@ impl KataGo {
             max_visits,
             analysis_pv_len: cfg.analysis_pv_len,
             include_ownership: cfg.include_ownership,
+            include_ownership_stdev: cfg.include_ownership_stdev,
+            include_policy: cfg.include_policy,
             priority,
-            override_settings: OverrideSettings::default(),
+            override_settings: OverrideSettings::new(human_profile),
         };
 
         let (tx, rx) = oneshot::channel();
@@ -932,8 +970,10 @@ mod tests {
             max_visits: 100,
             analysis_pv_len: 10,
             include_ownership: true,
+            include_ownership_stdev: true,
+            include_policy: true,
             priority: 0,
-            override_settings: OverrideSettings::default(),
+            override_settings: OverrideSettings::new(None),
         };
 
         let json = serde_json::to_value(&query).expect("the query serialises");
@@ -946,6 +986,70 @@ mod tests {
             json["overrideSettings"]["reportAnalysisWinratesAs"],
             REPORT_PERSPECTIVE.as_katago_setting()
         );
+    }
+
+    /// The human profile goes inside `overrideSettings` — KataGo silently
+    /// ignores it on the outer object — and is left out entirely without one,
+    /// since a worker with no human model fails any query that carries it.
+    #[test]
+    fn the_human_profile_rides_in_override_settings_only() {
+        let query = |profile| AnalysisQuery {
+            id: "q0".to_owned(),
+            rules: Rules::Japanese,
+            komi: 6.5,
+            board_x_size: 19,
+            board_y_size: 19,
+            initial_stones: vec![],
+            moves: vec![],
+            analyze_turns: vec![0],
+            max_visits: 10,
+            analysis_pv_len: 15,
+            include_ownership: true,
+            include_ownership_stdev: true,
+            include_policy: true,
+            priority: 0,
+            override_settings: OverrideSettings::new(profile),
+        };
+
+        let with = serde_json::to_value(query(Some("rank_5k"))).unwrap();
+        assert_eq!(with["overrideSettings"]["humanSLProfile"], "rank_5k");
+        assert!(with.get("humanSLProfile").is_none());
+        // KataGo's spellings, which camelCase alone would get wrong for PV.
+        assert_eq!(with["includeOwnershipStdev"], true);
+        assert_eq!(with["includePolicy"], true);
+        assert_eq!(with["analysisPVLen"], 15);
+
+        let without = serde_json::to_value(query(None)).unwrap();
+        assert!(without["overrideSettings"].get("humanSLProfile").is_none());
+    }
+
+    /// The v3 fields as KataGo v1.16.5 sends them (shape checked against a
+    /// real run: `policy`/`humanPolicy` are `size² + 1` with `-1` illegal,
+    /// `ownershipStdev` is `size²`, `humanPrior` sits on each candidate).
+    #[test]
+    fn a_turn_response_parses_policy_stdev_and_human_fields() {
+        let turn: TurnResponse = serde_json::from_value(serde_json::json!({
+            "id": "q0", "turnNumber": 1, "isDuringSearch": false,
+            "rootInfo": {"winrate": 0.5, "scoreLead": 0.0, "currentPlayer": "W"},
+            "moveInfos": [{"move": "A1", "winrate": 0.5, "prior": 0.4, "humanPrior": 0.3, "order": 0}],
+            "ownership": [0.1, 0.2, 0.3, 0.4],
+            "ownershipStdev": [0.01, 0.02, 0.03, 0.04],
+            "policy": [0.4, -1.0, 0.3, 0.2, 0.1],
+            "humanPolicy": [0.3, -1.0, 0.3, 0.3, 0.1]
+        }))
+        .unwrap();
+        assert_eq!(turn.ownership_stdev.as_ref().map(Vec::len), Some(4));
+        assert_eq!(turn.policy.as_ref().map(Vec::len), Some(5));
+        assert_eq!(turn.human_policy.as_ref().map(Vec::len), Some(5));
+        assert_eq!(turn.move_infos[0].human_prior, Some(0.3));
+
+        let bare: TurnResponse = serde_json::from_value(serde_json::json!({
+            "id": "q0", "turnNumber": 0, "moveInfos": [{"move": "A1", "winrate": 0.5}]
+        }))
+        .unwrap();
+        assert!(bare.policy.is_none() && bare.human_policy.is_none());
+        assert!(bare.ownership_stdev.is_none());
+        assert_eq!(bare.move_infos[0].human_prior, None);
     }
 
     /// Win rate and score lead are zero-sum, so the same position seen from the

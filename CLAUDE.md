@@ -160,6 +160,14 @@ hasn't committed (sequence numbers are taken at write time, not commit time).
 -config <cfg> -model <model>` as a long-lived subprocess and shares it as
 `Arc<AnalysisEngine>`. `analyze` = parse SGF (`engine/sgf.rs`) → drive KataGo over
 JSON (`engine/katago.rs`) → annotate moves (`engine/annotate.rs`).
+The payload is `payload_version` 3 (README "The analysis payload"): per-turn
+`ownership`/`ownership_stdev`/`policy` grids, and `human_policy` when a job names a
+`human_profile` (validated at submit, `engine/human.rs`) and the worker has
+`[engine] human_model` (`-human-model`). The profile rides the pgmq message and the
+cluster `JobRequest` as an optional field, and goes in the query's
+`overrideSettings.humanSLProfile` — never the outer object, and never to a KataGo
+without a human model (it fails the whole query; the engine drops the profile
+with a warning instead).
 
 ### Benchmarking the worker
 

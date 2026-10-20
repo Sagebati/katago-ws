@@ -269,7 +269,7 @@ impl WorkerClient {
         tokio::spawn(async move {
             let _permit = permit; // released when the analysis finishes
             let started = std::time::Instant::now();
-            let outcome = Self::run_job(&engine, &job.sgf).await;
+            let outcome = Self::run_job(&engine, &job.sgf, job.human_profile.as_deref()).await;
             let elapsed_ms = started.elapsed().as_millis() as u64;
             match &outcome {
                 Outcome::Ok(_) => {
@@ -286,8 +286,8 @@ impl WorkerClient {
     }
 
     /// Run one job through the local engine, mapping the result into the wire form.
-    async fn run_job(engine: &AnalysisEngine, sgf: &str) -> Outcome {
-        match engine.analyze(sgf).await {
+    async fn run_job(engine: &AnalysisEngine, sgf: &str, human_profile: Option<&str>) -> Outcome {
+        match engine.analyze(sgf, human_profile).await {
             Ok(analysis) => match serde_json::to_value(&analysis) {
                 Ok(value) => Outcome::Ok(value),
                 Err(err) => Outcome::Err(format!("serialize analysis: {err}")),
