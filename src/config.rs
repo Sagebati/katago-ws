@@ -310,6 +310,27 @@ impl Default for OrchestratorConfig {
     }
 }
 
+/// `[api]` — settings for trusted API clients.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ApiConfig {
+    /// Shared secret a client presents (Bearer) to use `POST /analyse/batch`.
+    /// That endpoint is not IP rate-limited — it exists so a backend submitting
+    /// on behalf of many users isn't throttled like one anonymous caller. Empty
+    /// (the default) leaves it open to anyone, like `[orchestrator].auth_token`;
+    /// set it on a public deployment once its clients send it. From the
+    /// environment (`KATAGO_WS_API__CLIENT_TOKEN`), never in this file.
+    pub client_token: SecretString,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            client_token: SecretString::from(String::new()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

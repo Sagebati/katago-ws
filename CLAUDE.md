@@ -147,7 +147,12 @@ JSON endpoints use `api_route` (documented); `/`, `/analyses/stream`, `/healthz`
 `/cluster` are plain routes (HTML/SSE/WS aren't expressible as JSON schema). aide
 types come through the `muxa::aide` re-export — never add a direct `aide` dep.
 `POST /analyse` is the only rate-limited endpoint (per-IP, muxa-web layer), in its
-own sub-router so the layer applies to it alone.
+own sub-router so the layer applies to it alone. `POST /analyse/batch` queues
+work too but skips the IP limit: it's gated by `[api].client_token` (Bearer,
+checked in the handler via [`src/auth.rs`](src/auth.rs)) when that is set, and
+open to anyone when it isn't — the same convention as the cluster token. `GET /analyses/changes` is the pull form of the stream's `change_seq` tail,
+holding back changes under 5 s old so a client cursor can't pass a write that
+hasn't committed (sequence numbers are taken at write time, not commit time).
 
 ### Engine
 
@@ -280,7 +285,7 @@ in YAML. Change the KataGo version in exactly one place: the justfile.
   `KATAGO_WS_ENGINE__MAX_VISITS`, `KATAGO_WS_DIESEL__URL`, `KATAGO_WS_ENV`). One prefix
   covers every section; there is no `KATAGO_WS_*` and no `muxa.toml` any more.
   muxa's plugins own `[web]/[otel]/[sentry]/[diesel]`; this crate owns
-  `[engine]/[worker]/[orchestrator]/[ratelimit]` (see [`src/config.rs`](src/config.rs)).
+  `[engine]/[worker]/[orchestrator]/[api]/[ratelimit]` (see [`src/config.rs`](src/config.rs)).
   Secrets come from the environment in production, not the committed `config.toml`.
 - **Lints are enforced** (`[lints.clippy]` in [`Cargo.toml`](Cargo.toml), a curated
   `restriction` subset). Notably: `unwrap_used`, `print_stdout`/`print_stderr`

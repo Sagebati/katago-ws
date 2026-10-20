@@ -60,9 +60,11 @@ redelivered exactly like a local one.
 | Method & path | Description |
 |---|---|
 | `POST /analyse` | Submit a raw SGF (request body) → `{ job_id, status }` (202). Rate-limited per IP. |
+| `POST /analyse/batch` | `{ "sgfs": [...] }`, up to 100 → one `{ job_id }` or `{ error }` per SGF, in order (202). Not IP rate-limited. Needs `Authorization: Bearer <[api].client_token>` when that is set; open to anyone when it isn't. |
 | `GET /analyse/{id}` | Job status, and the analysis once `done`. Long-poll with `?wait=<secs>`. |
 | `GET /analyses` | List recent jobs. |
 | `GET /analyses/stream` | Server-Sent Events: a snapshot then a live tail of job changes. |
+| `GET /analyses/changes?since=<cursor>` | Job changes after a cursor, oldest first → `{ changes, cursor, latest, more }`. The pull feed for clients tracking many jobs: one request per poll instead of one per job. Changes are released once 5 s old, so the cursor never skips a write still committing. |
 | `GET /` | Plain-HTML status dashboard (workers, running, queue). |
 | `GET /workers` | Connected cluster workers (orchestrator). |
 | `GET /healthz` | Liveness/readiness probe. |
@@ -155,6 +157,7 @@ production, not the committed file.
 | `KATAGO_WS_WORKER__CONCURRENCY` | Worker lease loops / advertised slots (games in flight per engine; default `4`). |
 | `KATAGO_WS_WORKER__ORCHESTRATOR_URL` | `worker` role: the `ws(s)://…/cluster` URL to dial. |
 | `KATAGO_WS_WORKER__AUTH_TOKEN` / `KATAGO_WS_ORCHESTRATOR__AUTH_TOKEN` | Shared Bearer secret for `/cluster`. |
+| `KATAGO_WS_API__CLIENT_TOKEN` | Bearer secret for `POST /analyse/batch`, which skips the per-IP rate limit. Unset ⇒ open to anyone (so anyone can skip the limit): set it on a public deployment once clients send it. |
 | `KATAGO_WS_SENTRY__DSN` | Enable Sentry (see below). |
 | `KATAGO_WS_OTEL__ENDPOINT` | OTLP/gRPC collector endpoint (unset ⇒ OTEL export off). |
 

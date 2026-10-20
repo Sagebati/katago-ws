@@ -5,14 +5,16 @@ use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Html;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use chrono::{DateTime, Utc};
 use muxa::diesel::DieselPool;
+use secrecy::ExposeSecret as _;
 use tokio_stream::Stream;
 use uuid::Uuid;
 
+use crate::auth;
 use crate::cluster::registry::WorkerInfo;
 use crate::db;
 use crate::db::models::{Job, JobSummary};
@@ -21,7 +23,8 @@ use crate::engine::sgf;
 use crate::error::{AppError, AppResult};
 use crate::http::ApiState;
 use crate::http::dto::{
-    AnalysisSummary, JobId, ListResponse, StatusQuery, StatusResponse, SubmitResponse,
+    AnalysisSummary, BatchItem, BatchSubmitRequest, BatchSubmitResponse, Change, ChangesQuery,
+    ChangesResponse, JobId, ListResponse, StatusQuery, StatusResponse, SubmitResponse,
     WorkerSummary, WorkersResponse,
 };
 
@@ -270,6 +273,108 @@ pub async fn submit(
     ))
 }
 
+/// Most SGFs one `POST /analyse/batch` may carry.
+pub const MAX_BATCH: usize = 100;
+
+/// Request body limit for `POST /analyse/batch`: room for [`MAX_BATCH`] long
+/// games, well above axum's 2 MiB default.
+pub const BATCH_BODY_LIMIT: usize = 16 * 1024 * 1024;
+
+/// `POST /analyse/batch` — submit up to [`MAX_BATCH`] SGFs at once.
+///
+/// Not IP rate-limited, unlike `POST /analyse`: a backend submitting for many
+/// users is one IP, and the per-IP quota would throttle all of them as one
+/// anonymous caller. With `[api].client_token` set, only a client presenting it
+/// gets in; without one, anyone does — which is also anyone able to skip the
+/// rate limit, so set a token on a public deployment once its clients have it. Each SGF is validated like a single submission; the valid
+/// ones are persisted and enqueued in one transaction, and every input gets a
+/// result at its own index — a job id, or why it was refused.
+pub async fn submit_batch(
+    State(api): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<BatchSubmitRequest>,
+) -> AppResult<(StatusCode, Json<BatchSubmitResponse>)> {
+    // No token configured: open to anyone, like the cluster socket without one.
+    if let Some(token) = &api.client_token
+        && !auth::bearer_matches(&headers, token.expose_secret())
+    {
+        return Err(AppError::Unauthorized);
+    }
+    if body.sgfs.len() > MAX_BATCH {
+        return Err(AppError::BadRequest(format!(
+            "at most {MAX_BATCH} SGFs per batch, got {}",
+            body.sgfs.len()
+        )));
+    }
+
+    let mut refused: Vec<Option<String>> = Vec::with_capacity(body.sgfs.len());
+    let mut accepted = Vec::new();
+    for sgf in body.sgfs {
+        match sgf::validate(&sgf) {
+            Ok(()) => {
+                refused.push(None);
+                accepted.push(sgf);
+            }
+            Err(err) => refused.push(Some(err.to_string())),
+        }
+    }
+
+    let mut ids = db::submit_many(&api.db, accepted).await?.into_iter();
+    let results = refused
+        .into_iter()
+        .map(|error| match error {
+            Some(error) => BatchItem {
+                job_id: None,
+                error: Some(error),
+            },
+            None => BatchItem {
+                job_id: ids.next(),
+                error: None,
+            },
+        })
+        .collect();
+
+    Ok((StatusCode::ACCEPTED, Json(BatchSubmitResponse { results })))
+}
+
+/// How long a change must have been written before `GET /analyses/changes`
+/// hands it out — time for the transaction that wrote it to commit.
+const SETTLE_SECS: i64 = 5;
+
+/// `GET /analyses/changes` — job state changes after a cursor, oldest first.
+///
+/// The pull counterpart of `/analyses/stream`, for a client that tracks many
+/// jobs: one request returns every job that moved since its last cursor, so it
+/// never has to ask about jobs one by one. Changes are released only once
+/// [`SETTLE_SECS`] old, so a cursor can't move past a write that hasn't
+/// committed yet.
+pub async fn changes(
+    State(api): State<ApiState>,
+    Query(query): Query<ChangesQuery>,
+) -> AppResult<Json<ChangesResponse>> {
+    let limit = query.limit.unwrap_or(500).clamp(1, 1000);
+    let (rows, held_back) = db::settled_changes(&api.db, query.since, limit, SETTLE_SECS).await?;
+    let latest = db::latest_change_seq(&api.db).await?;
+    let full = i64::try_from(rows.len()).is_ok_and(|count| count >= limit);
+    let cursor = rows.last().map_or(query.since, |(seq, _)| *seq);
+    let changes = rows
+        .into_iter()
+        .map(|(seq, row)| Change {
+            seq,
+            id: row.id,
+            status: row.status,
+            error: row.error,
+            updated_at: row.updated_at,
+        })
+        .collect();
+    Ok(Json(ChangesResponse {
+        changes,
+        cursor,
+        latest,
+        more: held_back || full,
+    }))
+}
+
 /// How often `?wait=` re-checks the job's state.
 const WAIT_POLL: Duration = Duration::from_secs(1);
 /// Upper bound on how long `?wait=` holds a request open (clamps the client's value).
@@ -409,7 +514,104 @@ fn error_event(err: &AppError) -> Result<Event, Infallible> {
 mod tests {
     use std::net::SocketAddr;
 
+    use axum::http::header;
+    use diesel_async::AsyncPgConnection;
+    use diesel_async::pooled_connection::AsyncDieselConnectionManager;
+    use diesel_async::pooled_connection::deadpool::Pool;
+    use secrecy::SecretString;
+
     use super::*;
+
+    /// State whose pool is never dialled: deadpool connects lazily, and every
+    /// path these tests take returns before touching the database.
+    fn state(client_token: &str) -> ApiState {
+        let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new(
+            "postgres://unused@127.0.0.1:1/unused",
+        );
+        ApiState {
+            db: DieselPool::from(Pool::builder(manager).max_size(1).build().unwrap()),
+            workers: None,
+            cluster: None,
+            client_token: ApiState::client_token(SecretString::from(client_token.to_owned())),
+        }
+    }
+
+    fn bearer(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        headers
+    }
+
+    fn batch(sgfs: &[&str]) -> Json<BatchSubmitRequest> {
+        Json(BatchSubmitRequest {
+            sgfs: sgfs.iter().map(|sgf| (*sgf).to_owned()).collect(),
+        })
+    }
+
+    /// Without a configured token anyone may submit a batch. Nothing valid is in
+    /// it, so nothing reaches the (never dialled) database.
+    #[tokio::test]
+    async fn batch_is_open_without_a_client_token() {
+        for headers in [HeaderMap::new(), bearer("anything")] {
+            let (status, Json(response)) =
+                submit_batch(State(state("")), headers, batch(&["not an sgf"]))
+                    .await
+                    .unwrap();
+            assert_eq!(status, StatusCode::ACCEPTED);
+            assert!(response.results[0].error.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_refuses_a_wrong_or_missing_token() {
+        for headers in [bearer("wrong"), HeaderMap::new()] {
+            let err = submit_batch(State(state("s3cret")), headers, batch(&[]))
+                .await
+                .err()
+                .unwrap();
+            assert!(matches!(err, AppError::Unauthorized));
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_refuses_more_than_the_maximum() {
+        let sgfs = vec!["(;GM[1])"; MAX_BATCH + 1];
+        let err = submit_batch(State(state("s3cret")), bearer("s3cret"), batch(&sgfs))
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    /// Every input gets a result at its own index; with nothing valid, nothing
+    /// reaches the database.
+    #[tokio::test]
+    async fn batch_reports_each_refused_sgf_at_its_index() {
+        let (status, Json(response)) = submit_batch(
+            State(state("s3cret")),
+            bearer("s3cret"),
+            batch(&["not an sgf", "(;GM[1]"]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(response.results.len(), 2);
+        assert!(
+            response
+                .results
+                .iter()
+                .all(|item| item.job_id.is_none() && item.error.is_some())
+        );
+    }
+
+    #[test]
+    fn an_empty_client_token_is_unset() {
+        assert!(ApiState::client_token(SecretString::from(String::new())).is_none());
+        assert!(ApiState::client_token(SecretString::from("x".to_owned())).is_some());
+    }
 
     fn job(status: JobStatus) -> JobSummary {
         let now = Utc::now();

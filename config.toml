@@ -83,8 +83,16 @@ model = "model.bin.gz"
 # refine_winrate_delta = 0.03
 # refine_score_delta = 1.0
 
+[api]
+# Bearer secret for POST /analyse/batch, which is not IP rate-limited (it's for
+# a backend submitting for many users). Empty = open to anyone, which also lets
+# anyone skip the rate limit: set it on a public deployment once its clients
+# send it. Via KATAGO_WS_API__CLIENT_TOKEN, never here.
+# client_token = "…"
+
 [ratelimit]
-# Per-IP rate limit on POST /analyse (the only endpoint that queues KataGo work).
+# Per-IP rate limit on POST /analyse, the public way to queue KataGo work
+# (POST /analyse/batch is gated by [api].client_token, when set, instead).
 # In-memory, per instance — a coarse abuse guard, not a global cap (each replica
 # has its own buckets). GCRA quota: one submit allowance restored every
 # `period_ms`, up to `burst` at once → here, 100 submits per IP per hour: one

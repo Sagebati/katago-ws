@@ -133,3 +133,77 @@ pub struct WorkersResponse {
     /// Workers connected to this orchestrator, oldest connection first.
     pub workers: Vec<WorkerSummary>,
 }
+
+/// Body of `POST /analyse/batch`.
+#[derive(Deserialize, JsonSchema)]
+pub struct BatchSubmitRequest {
+    /// The SGFs to analyse, at most [`MAX_BATCH`](crate::http::handlers::MAX_BATCH).
+    pub sgfs: Vec<String>,
+}
+
+/// One input's outcome in a batch, at the same index as its SGF. Exactly one of
+/// `job_id` and `error` is set.
+#[derive(Serialize, JsonSchema)]
+pub struct BatchItem {
+    /// The created job, when the SGF was accepted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<String>")]
+    pub job_id: Option<Uuid>,
+    /// Why the SGF was refused (it didn't parse), when it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response to `POST /analyse/batch`.
+#[derive(Serialize, JsonSchema)]
+pub struct BatchSubmitResponse {
+    /// One entry per submitted SGF, in input order.
+    pub results: Vec<BatchItem>,
+}
+
+/// Query parameters for `GET /analyses/changes`.
+#[derive(Deserialize, JsonSchema)]
+pub struct ChangesQuery {
+    /// Return changes after this cursor: the `cursor` of the previous response,
+    /// or 0 to start from the beginning.
+    #[serde(default)]
+    pub since: i64,
+    /// Most changes to return, clamped to 1..=1000. Defaults to 500.
+    pub limit: Option<i64>,
+}
+
+/// One job's state as of one change.
+#[derive(Serialize, JsonSchema)]
+pub struct Change {
+    /// The change's position in the feed (the job's `change_seq` at the time).
+    pub seq: i64,
+    /// Job id.
+    #[schemars(with = "String")]
+    pub id: Uuid,
+    /// The job's lifecycle state after this change.
+    pub status: JobStatus,
+    /// Failure detail, present when `status = failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// When the change happened (UTC, RFC 3339).
+    #[schemars(with = "String")]
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Response to `GET /analyses/changes`.
+#[derive(Serialize, JsonSchema)]
+pub struct ChangesResponse {
+    /// Changes after `since`, oldest first. A job appears once per change still
+    /// in the window; only its latest state is current.
+    pub changes: Vec<Change>,
+    /// Pass as `since` next time: the last change's `seq`, or `since` itself
+    /// when there were none.
+    pub cursor: i64,
+    /// The newest `seq` this service has issued. Lower than a client's cursor
+    /// means the service's store was reset, and the client should start again
+    /// from 0.
+    pub latest: i64,
+    /// True when more changes are waiting — the page was full, or recent ones
+    /// were held back to let them settle. Ask again soon.
+    pub more: bool,
+}

@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse as _, Response};
 use futures_util::stream::SplitStream;
 use futures_util::{SinkExt as _, StreamExt as _};
@@ -29,6 +29,7 @@ use serde_json::Value as Json;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use uuid::Uuid;
 
+use crate::auth;
 use crate::cluster::message::{ClientMsg, JobRequest, Outcome};
 use crate::cluster::registry::WorkerRegistry;
 use crate::config::WorkerConfig;
@@ -72,26 +73,8 @@ impl ClusterDispatcher {
         if expected.is_empty() {
             return true;
         }
-        headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
-            .is_some_and(|presented| tokens_match(presented, expected))
+        auth::bearer_matches(headers, expected)
     }
-}
-
-/// Length-checked constant-time token comparison (avoids leaking match length via
-/// early return on the byte loop).
-fn tokens_match(presented: &str, expected: &str) -> bool {
-    let (presented, expected) = (presented.as_bytes(), expected.as_bytes());
-    if presented.len() != expected.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (left, right) in presented.iter().zip(expected) {
-        diff |= left ^ right;
-    }
-    diff == 0
 }
 
 /// `GET /cluster` — upgrade a worker's connection to the cluster WebSocket.
@@ -267,6 +250,8 @@ impl Executor for RemoteExecutor {
 
 #[cfg(test)]
 mod tests {
+    use axum::http::header;
+
     use super::*;
 
     fn dispatcher(token: &str) -> ClusterDispatcher {
@@ -284,13 +269,6 @@ mod tests {
             format!("Bearer {token}").parse().unwrap(),
         );
         headers
-    }
-
-    #[test]
-    fn constant_time_compare_matches_only_identical() {
-        assert!(tokens_match("s3cret", "s3cret"));
-        assert!(!tokens_match("s3cret", "s3crew"));
-        assert!(!tokens_match("s3cret", "s3cre")); // length differs
     }
 
     #[test]

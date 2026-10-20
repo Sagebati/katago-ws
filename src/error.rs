@@ -25,6 +25,13 @@ pub enum AppError {
     /// Requested resource does not exist.
     #[error("not found")]
     NotFound,
+    /// The request was well-formed JSON but asked for something we refuse.
+    #[error("bad request: {0}")]
+    BadRequest(String),
+    /// A trusted-client endpoint was called without the right Bearer token.
+    #[error("unauthorized")]
+    Unauthorized,
+
     /// ONNX inference failed.
     #[error("inference error: {0}")]
     Inference(String),
@@ -65,8 +72,9 @@ pub struct ErrorBody {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = match &self {
-            AppError::Sgf(_) => StatusCode::BAD_REQUEST,
+            AppError::Sgf(_) | AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::NotFound => StatusCode::NOT_FOUND,
+            AppError::Unauthorized => StatusCode::UNAUTHORIZED,
             AppError::Inference(_)
             | AppError::ModelLoad(_)
             | AppError::Db(_)

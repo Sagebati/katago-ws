@@ -59,6 +59,31 @@ pub async fn submit(pool: &DieselPool, sgf: String) -> AppResult<Uuid> {
     .await
 }
 
+/// Submit several jobs at once, in **one** transaction: every SGF gets a row and
+/// a queue message, or none do. Ids come back in input order.
+pub async fn submit_many(pool: &DieselPool, sgfs: Vec<String>) -> AppResult<Vec<Uuid>> {
+    if sgfs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut conn = pool.0.get().await.map_err(db_err)?;
+    conn.transaction::<Vec<Uuid>, AppError, _>(async move |conn| {
+        let mut ids = Vec::with_capacity(sgfs.len());
+        for sgf in sgfs {
+            let job_id: Uuid = diesel::insert_into(jobs::table)
+                .default_values()
+                .returning(jobs::id)
+                .get_result(conn)
+                .await?;
+            conn.send(Queue::Analysis.as_str(), &JobMessage { job_id, sgf }, (), 0)
+                .await
+                .map_err(|err| AppError::Queue(err.to_string()))?;
+            ids.push(job_id);
+        }
+        Ok(ids)
+    })
+    .await
+}
+
 /// Mark a job as running (a worker picked it up). No-op if already terminal.
 pub async fn set_running(pool: &DieselPool, job_id: Uuid) -> AppResult<()> {
     let mut conn = pool.0.get().await.map_err(db_err)?;
@@ -195,6 +220,46 @@ pub async fn changes_since(pool: &DieselPool, cursor: i64) -> AppResult<Vec<(i64
         .await
         .map_err(db_err)?;
     Ok(rows)
+}
+
+/// Up to `limit` changes after `cursor`, oldest first, for the
+/// `GET /analyses/changes` feed — cut short at the first change younger than
+/// `settle_secs`.
+///
+/// `change_seq` is taken when a row is written, not when its transaction
+/// commits, so a slow transaction can become visible *after* a later number
+/// already has. A reader that had moved its cursor past it would never see it.
+/// Holding back recent changes, and everything after them, gives in-flight
+/// writes time to commit before the cursor can pass them. Returns the rows and
+/// whether any were held back.
+pub async fn settled_changes(
+    pool: &DieselPool,
+    cursor: i64,
+    limit: i64,
+    settle_secs: i64,
+) -> AppResult<(Vec<(i64, JobSummary)>, bool)> {
+    let mut conn = pool.0.get().await.map_err(db_err)?;
+    // `now()` on the database's clock, the one that stamped `updated_at`.
+    let settled =
+        diesel::dsl::sql::<diesel::sql_types::Bool>("updated_at <= now() - make_interval(secs => ")
+            .bind::<diesel::sql_types::BigInt, _>(settle_secs)
+            .sql(")");
+    let rows: Vec<(i64, JobSummary, bool)> = jobs::table
+        .filter(jobs::change_seq.gt(cursor))
+        .order(jobs::change_seq.asc())
+        .limit(limit)
+        .select((jobs::change_seq, JobSummary::as_select(), settled))
+        .load(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    let total = rows.len();
+    let ready: Vec<(i64, JobSummary)> = rows
+        .into_iter()
+        .take_while(|(_, _, settled)| *settled)
+        .map(|(seq, row, _)| (seq, row))
+        .collect();
+    let held_back = ready.len() < total;
+    Ok((ready, held_back))
 }
 
 /// The newest `change_seq` (or 0 if empty) — where the stream starts tailing
