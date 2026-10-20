@@ -39,6 +39,10 @@ pub struct JobMessage {
     pub job_id: Uuid,
     /// The SGF to analyze.
     pub sgf: String,
+    /// Human SL profile (`rank_5k`, …) to report the human policy for, if any.
+    /// Optional on the wire, so messages queued before it existed still read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_profile: Option<String>,
 }
 
 /// How often a long-poll re-checks the queue — pgmq's SQL default.

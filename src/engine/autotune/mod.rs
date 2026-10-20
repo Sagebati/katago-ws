@@ -294,7 +294,8 @@ fn with_tuned(mut cfg: EngineConfig, explicit: &[&str], tuned: &Overrides) -> En
 }
 
 /// `cfg` launched with exactly `over` as `-override-config` (the four
-/// `[engine]` tuning fields zeroed so their defaults don't join in).
+/// `[engine]` tuning fields zeroed so their defaults don't join in), and
+/// without the human model.
 fn launch_cfg(cfg: &EngineConfig, over: &Overrides) -> EngineConfig {
     EngineConfig {
         analysis_threads: 0,
@@ -302,6 +303,9 @@ fn launch_cfg(cfg: &EngineConfig, over: &Overrides) -> EngineConfig {
         nn_server_threads: 0,
         nn_max_batch_size: 0,
         override_config: over.to_string(),
+        // Trials never ask for a human profile, so the second net would only
+        // cost load time and VRAM.
+        human_model: String::new(),
         ..cfg.clone()
     }
 }

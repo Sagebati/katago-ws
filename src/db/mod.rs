@@ -36,11 +36,29 @@ fn db_err<E: std::fmt::Display>(err: E) -> AppError {
 /// updates with this makes them idempotent against queue redelivery.
 const NON_TERMINAL: [JobStatus; 2] = [JobStatus::Queued, JobStatus::Running];
 
+/// What a client submits: the game, and how to analyse it.
+pub struct NewJob {
+    /// The SGF to analyse.
+    pub sgf: String,
+    /// Human SL profile to report the human policy for, already validated.
+    pub human_profile: Option<String>,
+}
+
+impl NewJob {
+    fn into_message(self, job_id: Uuid) -> JobMessage {
+        JobMessage {
+            job_id,
+            sgf: self.sgf,
+            human_profile: self.human_profile,
+        }
+    }
+}
+
 /// Submit a job. The **database** mints the (time-ordered v7) id via the `jobs.id`
 /// DEFAULT — `RETURNING` hands it back — and the same transaction enqueues the
 /// work (SGF in the message). One transaction, so a client never gets an id for a
 /// job that isn't both visible and queued.
-pub async fn submit(pool: &DieselPool, sgf: String) -> AppResult<Uuid> {
+pub async fn submit(pool: &DieselPool, job: NewJob) -> AppResult<Uuid> {
     let mut conn = pool.0.get().await.map_err(db_err)?;
     conn.transaction::<Uuid, AppError, _>(async move |conn| {
         // All columns default (uuidv7 id, 'queued' status, timestamps, change_seq);
@@ -51,7 +69,7 @@ pub async fn submit(pool: &DieselPool, sgf: String) -> AppResult<Uuid> {
             .get_result(conn)
             .await?;
         // No headers, no delay.
-        conn.send(Queue::Analysis.as_str(), &JobMessage { job_id, sgf }, (), 0)
+        conn.send(Queue::Analysis.as_str(), job.into_message(job_id), (), 0)
             .await
             .map_err(|err| AppError::Queue(err.to_string()))?;
         Ok(job_id)
@@ -61,20 +79,20 @@ pub async fn submit(pool: &DieselPool, sgf: String) -> AppResult<Uuid> {
 
 /// Submit several jobs at once, in **one** transaction: every SGF gets a row and
 /// a queue message, or none do. Ids come back in input order.
-pub async fn submit_many(pool: &DieselPool, sgfs: Vec<String>) -> AppResult<Vec<Uuid>> {
-    if sgfs.is_empty() {
+pub async fn submit_many(pool: &DieselPool, jobs: Vec<NewJob>) -> AppResult<Vec<Uuid>> {
+    if jobs.is_empty() {
         return Ok(Vec::new());
     }
     let mut conn = pool.0.get().await.map_err(db_err)?;
     conn.transaction::<Vec<Uuid>, AppError, _>(async move |conn| {
-        let mut ids = Vec::with_capacity(sgfs.len());
-        for sgf in sgfs {
+        let mut ids = Vec::with_capacity(jobs.len());
+        for job in jobs {
             let job_id: Uuid = diesel::insert_into(jobs::table)
                 .default_values()
                 .returning(jobs::id)
                 .get_result(conn)
                 .await?;
-            conn.send(Queue::Analysis.as_str(), &JobMessage { job_id, sgf }, (), 0)
+            conn.send(Queue::Analysis.as_str(), job.into_message(job_id), (), 0)
                 .await
                 .map_err(|err| AppError::Queue(err.to_string()))?;
             ids.push(job_id);

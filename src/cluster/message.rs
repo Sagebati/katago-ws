@@ -37,6 +37,11 @@ pub struct JobRequest {
     pub job_id: Uuid,
     /// The SGF to analyze.
     pub sgf: String,
+    /// Human SL profile to report the human policy for, if any. Optional on
+    /// the wire: a worker that predates it ignores it (and returns no human
+    /// policy), and one that has it reads an older orchestrator's requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_profile: Option<String>,
 }
 
 /// The result of running one job on a worker. Externally tagged (`{"ok": …}` /

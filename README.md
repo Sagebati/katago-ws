@@ -59,8 +59,8 @@ redelivered exactly like a local one.
 
 | Method & path | Description |
 |---|---|
-| `POST /analyse` | Submit a raw SGF (request body) → `{ job_id, status }` (202). Rate-limited per IP. |
-| `POST /analyse/batch` | `{ "sgfs": [...] }`, up to 100 → one `{ job_id }` or `{ error }` per SGF, in order (202). Not IP rate-limited. Needs `Authorization: Bearer <[api].client_token>` when that is set; open to anyone when it isn't. |
+| `POST /analyse` | Submit a raw SGF (request body) → `{ job_id, status }` (202). Optional `?human_profile=rank_5k` (see [Human policy](#human-policy)). Rate-limited per IP. |
+| `POST /analyse/batch` | `{ "sgfs": [...] }`, up to 100 → one `{ job_id }` or `{ error }` per SGF, in order (202). Each entry is an SGF string or `{ "sgf": "…", "human_profile": "rank_5k" }`. Not IP rate-limited. Needs `Authorization: Bearer <[api].client_token>` when that is set; open to anyone when it isn't. |
 | `GET /analyse/{id}` | Job status, and the analysis once `done`. Long-poll with `?wait=<secs>`. |
 | `GET /analyses` | List recent jobs. |
 | `GET /analyses/stream` | Server-Sent Events: a snapshot then a live tail of job changes. |
@@ -76,6 +76,64 @@ redelivered exactly like a local one.
 curl -X POST --data-binary @ear_reddening.sgf http://localhost:3000/analyse
 curl 'http://localhost:3000/analyse/<id>?wait=30'
 ```
+
+## The analysis payload
+
+`GET /analyse/{id}` returns the analysis in `result` once the job is `done`.
+`payload_version` says which contract built it (see `PAYLOAD_VERSION` in
+[`src/engine/annotate.rs`](src/engine/annotate.rs)); every field added since v2
+is optional, so a v2 reader reads a v3 payload unchanged.
+
+Per-turn grids are indexed by **turn**, `0..=moves.len()`: turn `i` is the
+position before move `i + 1`. Each is `board_size²` points, row-major from the
+top-left (A19 → T1), and all-or-nothing: present for every turn or absent.
+
+| Field | Since | Shape / encoding |
+|---|---|---|
+| `ownership` | v2 | `i8[turns][size²]`, hundredths, `-100..=100`, always Black-positive |
+| `ownership_stdev` | v3 | `u8[turns][size²]`, hundredths, `0..=100`: spread of ownership across the search tree, high = unsettled |
+| `policy` | v3 | `u8[turns][size²]`, `round(255·√p)` of the raw network policy for the side to move; decode `(v/255)²`. `0` = illegal (or `p < ~4e-6`). KataGo's pass entry is dropped |
+| `human_policy` | v3 | as `policy`, from the human SL network under `human_profile`; only with a profile and a human model |
+| `human_profile` | v3 | the profile `human_policy` was computed for; present exactly when `human_policy` is |
+| `moves[].prior` | v3 | raw policy of the move played, `[0, 1]`, exact (not the u8 grid) |
+| `moves[].human_prior` | v3 | human policy of the move played; only with `human_policy` |
+| `moves[].top_moves[].prior` | v1 | raw policy of the candidate |
+| `moves[].top_moves[].human_prior` | v3 | human policy of the candidate; only with `human_policy` |
+| `engine.ownership_stdev` / `engine.policy` | v3 | whether those grids are present |
+| `engine.human_model` | v3 | the human SL network file, when `human_policy` is present |
+
+Principal variations (`top_moves[].pv`) run to 15 moves by default
+(`[engine] analysis_pv_len`), bounded by how deep the search went. A 325-move
+19×19 game with every grid is ~1.5 MB of JSON (~280 KB gzipped).
+`KATAGO_WS_ENGINE__INCLUDE_OWNERSHIP_STDEV=false` and `__INCLUDE_POLICY=false`
+drop those grids; neither costs search time, only payload.
+
+## Human policy
+
+KataGo's human SL network predicts how a player of a given rank would play.
+With it loaded, a job that names a `human_profile` gets that player's policy
+for every position (`human_policy`) and for each move (`human_prior`).
+
+1. Download the network, `b18c384nbt-humanv0.bin.gz` (~100 MB), from the
+   [KataGo v1.15.0 release](https://github.com/lightvector/KataGo/releases/tag/v1.15.0).
+   The images don't bundle it.
+2. Point the worker at it: `KATAGO_WS_ENGINE__HUMAN_MODEL=/path/to/b18c384nbt-humanv0.bin.gz`
+   (in Docker, mount it, e.g. `-v ./b18c384nbt-humanv0.bin.gz:/opt/katago/human.bin.gz:ro
+   -e KATAGO_WS_ENGINE__HUMAN_MODEL=/opt/katago/human.bin.gz`). KataGo then runs
+   with `-human-model`, which takes roughly another 100 MB of VRAM; the network
+   is evaluated once per position, not per visit, so search speed is unchanged.
+3. Submit with a profile: `POST /analyse?human_profile=rank_5k`, or
+   `{"sgf": "…", "human_profile": "rank_5k"}` in a batch.
+
+Profiles (validated at submit; an unknown one is a 400, or that game's `error`
+in a batch): `rank_20k` … `rank_1k`, `rank_1d` … `rank_9d`; `rank_<B>_<W>` for
+Black's and White's ranks, e.g. `rank_1d_5k`; `preaz_…`, the same with
+pre-AlphaZero (2016) openings; `proyear_1800` … `proyear_2023`. One profile per
+job. The profile only shapes the reported human policy, not the search.
+
+A worker without a human model analyses such a job without the human fields
+and logs a warning, rather than failing it. With several workers, configure the
+model on all of them or a job's human policy depends on which one took it.
 
 ## Quick start
 
@@ -153,6 +211,8 @@ production, not the committed file.
 | `KATAGO_WS_ENGINE__ANALYSIS_THREADS` / `__SEARCH_THREADS_PER_ANALYSIS` | KataGo `numAnalysisThreads` × `numSearchThreadsPerAnalysisThread` (default: system threads × `1`, the throughput preset). See [Throughput tuning](#throughput-tuning). |
 | `KATAGO_WS_ENGINE__NN_MAX_BATCH_SIZE` / `__NN_SERVER_THREADS` / `__OVERRIDE_CONFIG` | More KataGo overrides (`0` / empty = keep `analysis.cfg`). |
 | `KATAGO_WS_ENGINE__AUTOTUNE` / `__AUTOTUNE_MODE` | Startup throughput auto-tune: on by default (`false` = off); `thorough` (default) or `fast` (under ~30 s). See [Throughput tuning](#throughput-tuning). |
+| `KATAGO_WS_ENGINE__HUMAN_MODEL` | KataGo human SL network (`-human-model`); empty (default) = none. See [Human policy](#human-policy). |
+| `KATAGO_WS_ENGINE__INCLUDE_OWNERSHIP_STDEV` / `__INCLUDE_POLICY` / `__ANALYSIS_PV_LEN` | Payload contents: the `ownership_stdev` and `policy` grids (default `true`) and PV length (default `15`). |
 | `KATAGO_WS_ENGINE__SCREEN_VISITS` | Two-pass analysis: screen every move at this many visits, re-search only the swings at `MAX_VISITS` (default `0` = off). |
 | `KATAGO_WS_WORKER__CONCURRENCY` | Worker lease loops / advertised slots (games in flight per engine; default `4`). |
 | `KATAGO_WS_WORKER__ORCHESTRATOR_URL` | `worker` role: the `ws(s)://…/cluster` URL to dial. |
