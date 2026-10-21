@@ -39,6 +39,7 @@ mod healthcheck;
 mod http;
 mod metrics;
 mod queue;
+mod trace;
 mod worker;
 
 use std::sync::Arc;

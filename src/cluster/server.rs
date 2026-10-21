@@ -233,10 +233,13 @@ impl Executor for RemoteExecutor {
 
         // `sgf` is owned (moved out of the dequeued message) → straight onto the
         // wire, no copy.
+        // Carry the job's trace (we're inside its `queue.process` span), so the
+        // worker's analysis shows up under it.
         let request = JobRequest {
             job_id,
             sgf,
             human_profile,
+            trace: crate::trace::propagation_header(),
         };
         if self.out_tx.send(request).await.is_err() {
             self.pending.lock().await.remove(&job_id);
@@ -311,6 +314,7 @@ mod tests {
             job_id: Uuid::nil(),
             sgf: "(;GM[1])".to_owned(),
             human_profile: Some("rank_5k".to_owned()),
+            trace: None,
         };
         let wire = serde_json::to_string(&job).unwrap();
         let read = serde_json::from_str::<JobRequest>(&wire).unwrap();

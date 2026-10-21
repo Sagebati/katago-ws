@@ -42,6 +42,11 @@ pub struct JobRequest {
     /// policy), and one that has it reads an older orchestrator's requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub human_profile: Option<String>,
+    /// The orchestrator's `sentry-trace` header for this job, so the worker's
+    /// analysis spans join the orchestrator's job trace. Optional on the wire,
+    /// like `human_profile`; absent when the orchestrator isn't tracing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<String>,
 }
 
 /// The result of running one job on a worker. Externally tagged (`{"ok": …}` /

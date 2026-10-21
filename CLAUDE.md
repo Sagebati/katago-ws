@@ -305,6 +305,13 @@ in YAML. Change the KataGo version in exactly one place: the justfile.
   The KataGo client and the worker `WorkerRegistry` (`src/cluster/registry.rs`) each
   have one owner task that exclusively holds the state; everything else talks to it
   by message-passing. Follow this for new shared state.
+- **Sentry trace boundaries** ([`src/trace.rs`](src/trace.rs)): the tracing→Sentry
+  bridge parents a span on the hub's *active Sentry span*, not on `tracing`'s
+  parent, so `parent: None` doesn't start a trace inside a background task (it
+  lands under `muxa.task`, which muxa never samples). Wrap work that should be its
+  own transaction in `trace::in_new_trace`, and routine background queries
+  (polls, heartbeats) in `trace::untraced` — outside any span each query would
+  become a transaction of its own.
 - **The queue name is not configurable** — it's fixed to `queue::Queue::Analysis`
   (`"analysis"`), the single source of truth that `PgmqPlugin` creates and
   `db::submit` produces to, so consumer and producer can't drift.

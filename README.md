@@ -223,27 +223,39 @@ production, not the committed file.
 
 ## Observability
 
-Set **`KATAGO_WS_SENTRY__DSN`** and the orchestrator reports, in Sentry, all of:
+Set **`KATAGO_WS_SENTRY__DSN`** (or the SDK's own `SENTRY_DSN`) and the service
+reports, in Sentry, all of:
 
 - **Issues** — panics and `error!` events.
 - **Logs** — INFO/WARN/ERROR lines stream to the Logs explorer.
-- **Traces + DB spans** — one transaction per HTTP request, diesel queries as child
-  spans (sampled at `KATAGO_WS_SENTRY__TRACES_SAMPLE_RATE`; defaults to 0.1 in prod, 1.0
-  in dev).
+- **Traces + DB spans** — one transaction per HTTP request, named by route
+  (`GET /analyse/{id}`), diesel queries as child spans. `config.toml` traces every
+  transaction (`KATAGO_WS_SENTRY__TRACES_SAMPLE_RATE` to lower it) except the
+  Docker health probe (never) and the polled `GET /analyses/changes` (2%) — see
+  `[sentry.transaction_sample_rates]`. Idle queue polls and lock heartbeats aren't
+  traced at all.
 - **Custom metrics** — dual-emitted (OTEL + Sentry SDK, since Sentry doesn't ingest
   OTLP metrics):
   - `katago_ws.workers.connected` — gauge: connected workers.
   - `katago_ws.jobs.waiting` — gauge: queue depth.
   - `katago_ws.jobs.processed{outcome}` — counter: throughput.
   - `katago_ws.job.duration{outcome}` — histogram: time per job.
+  - `katago_ws.job.queue_wait` — histogram: time a job sat queued before a worker
+    picked it up. Rising means the workers can't keep up.
   - `katago_ws.moves.analyzed` — counter: moves in completed games. **Its rate is
     the throughput number to watch** (jobs/s isn't: game lengths vary too much).
   - `katago_ws.positions.analyzed{pass}` — counter: positions KataGo searched, by
     `pass` (`full`, or `screen`/`refine` with two-pass analysis).
 - **Job traces** — each queue delivery is an `analysis_job` transaction (job id,
-  attempt), with the DB writes, `katago.analyze` (moves, refined turns) and one
-  `katago.pass` span per KataGo query (pass, positions, visits) beneath it. In the
-  `orchestrator` + `worker` split, the engine spans are traced on the worker.
+  attempt), with a `queue.process` span, the DB writes, `katago.analyze` (moves,
+  refined turns) and one `katago.pass` span per KataGo query (pass, positions,
+  visits) beneath it. In the `orchestrator` + `worker` split the job request carries
+  the trace, so the worker's `cluster.job` (with the engine spans) joins the same
+  trace.
+- **Queues** — `POST /analyse` enqueues under a `queue.publish` span and the worker
+  consumes under `queue.process` (`messaging.*` data: message id, receive latency,
+  retry count), which fills Sentry's *Insights → Queues* view: time in queue,
+  processing time and retries for the `analysis` queue.
 
 The same metrics/traces/logs also export over **OTLP** if you set
 `KATAGO_WS_OTEL__ENDPOINT` to a collector (e.g. `grafana/otel-lgtm`) — useful for
