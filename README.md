@@ -55,6 +55,34 @@ workers can't reach Postgres directly. Workers connect over a **WebSocket** at
 them); the pgmq lease stays on the orchestrator, so a remote worker crash is
 redelivered exactly like a local one.
 
+### Flags
+
+The engine roles take flags for the keys most often changed per host, so a worker
+can be sized on its command line rather than with env vars:
+
+```bash
+katago-ws worker --orchestrator wss://engine.example/cluster --threads 8 --slots 4 --visits 500
+```
+
+| Flag | Key | Roles |
+|---|---|---|
+| `--visits N` | `[engine] max_visits` | standalone, worker, bench, autotune |
+| `--threads N` | `[engine] analysis_threads` (`numAnalysisThreads`) | 〃 |
+| `--search-threads N` | `[engine] search_threads_per_analysis` | 〃 |
+| `--nn-threads N` | `[engine] nn_server_threads` | 〃 |
+| `--batch-size N` | `[engine] nn_max_batch_size` | 〃 |
+| `--model PATH` / `--human-model PATH` | `[engine] model` / `human_model` | 〃 |
+| `--no-autotune` | `[engine] autotune = false` | 〃 |
+| `--slots N` | `[worker] concurrency` | standalone, worker, autotune |
+| `--orchestrator URL` / `--name NAME` | `[worker] orchestrator_url` / `name` | worker |
+
+A flag wins over the env var and the config file for the same key; one left out
+changes nothing. To the auto-tune a flag is as explicit as an env var: `--threads`
+pins `numAnalysisThreads` and the rest are still tuned. Secrets (the cluster token,
+the database URL) have no flag, since argv is visible to every user on the host,
+and neither does the web port, which the image's `HEALTHCHECK` reads from env.
+`katago-ws <role> --help` lists them all.
+
 ## HTTP API
 
 | Method & path | Description |
@@ -197,7 +225,7 @@ cargo clippy         # lints are enforced
 
 [`config.toml`](config.toml) (or the file `$KATAGO_WS_CONFIG` points at) is merged
 with `KATAGO_WS_*` environment variables (`__` = table nesting), the environment
-winning. Every section uses that one prefix, framework ones (`[web]`, `[diesel]`,
+winning, and [flags](#flags) win over both. Every section uses that one prefix, framework ones (`[web]`, `[diesel]`,
 `[sentry]`, `[otel]`) included. Secrets should come from the environment in
 production, not the committed file.
 
@@ -334,6 +362,11 @@ docker run --rm \
   -e KATAGO_WS_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
   -e KATAGO_WS_ENGINE__MAX_VISITS=20 \
   ghcr.io/sagebati/katago-ws:latest worker
+
+# The same, with flags instead of env vars, on 8 CPU threads:
+docker run --rm ghcr.io/sagebati/katago-ws:latest worker \
+  --orchestrator ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
+  --visits 20 --threads 8
 
 # NVIDIA GPU (CUDA) — add `--gpus all` (needs the NVIDIA Container Toolkit):
 docker run --rm --gpus all \

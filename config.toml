@@ -112,7 +112,9 @@ burst = 10
 trust_forwarded_for = false
 
 # Launch role is the first CLI argument (NOT config): `katago-ws [standalone|
-# orchestrator|worker]`, default `standalone`. `standalone` = web + in-process
+# orchestrator|worker]`, default `standalone`. The engine roles also take flags
+# for common [engine]/[worker] keys (`katago-ws worker --threads 8 --slots 4`),
+# which win over this file and env; `katago-ws worker --help` lists them. `standalone` = web + in-process
 # workers (one process). `orchestrator` = web + pgmq + the cluster WebSocket
 # dispatcher (served at `/cluster` on the web port; no engine). `worker` = KataGo +
 # WebSocket client dialing the orchestrator (no Postgres); serves /healthz only.

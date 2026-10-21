@@ -67,7 +67,13 @@ validate muxa changes by building/testing through this crate.
 ### Launch roles (one binary, four modes)
 
 The role is the **first CLI argument** (or the `KATAGO_WS_ROLE` env var), *not*
-config — see `Role::resolve` in [`src/main.rs`](src/main.rs):
+config — a clap subcommand, see `Role::resolve` in [`src/cli.rs`](src/cli.rs).
+The engine roles also take flags (`--threads`, `--visits`, `--slots`,
+`--orchestrator`, …), each standing for one `[engine]`/`[worker]` key; they are
+merged as the last figment layer over muxa's file + env, so they win and count as
+explicit to the auto-tune. Secrets and `[web] port` deliberately get no flag (argv
+is world-readable; the `HEALTHCHECK` reads the port from env). A new flag is a
+field on `EngineArgs`/`WorkerArgs` named after its config key:
 
 - **`standalone`** (default) — web API + in-process worker loops sharing one
   Postgres/pgmq. The original single-process deployment.
