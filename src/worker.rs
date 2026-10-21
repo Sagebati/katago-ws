@@ -76,7 +76,9 @@ impl Executor for LocalExecutor {
         human_profile: Option<String>,
     ) -> AppResult<Json> {
         let analysis = self.engine.analyze(&sgf, human_profile.as_deref()).await?;
-        serde_json::to_value(&analysis).map_err(|err| AppError::Internal(err.to_string()))
+        crate::blocking::offload(move || serde_json::to_value(&analysis))
+            .await
+            .map_err(|err| AppError::Internal(err.to_string()))
     }
 }
 

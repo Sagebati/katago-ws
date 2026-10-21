@@ -34,6 +34,7 @@
 
 mod auth;
 mod bench;
+mod blocking;
 mod cli;
 mod cluster;
 mod config;
@@ -64,7 +65,10 @@ use crate::engine::{AnalysisEngine, AutotunePlugin, KataGoEnginePlugin};
 /// that own the database (`standalone`/`orchestrator`).
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 
-#[tokio::main]
+// One thread: every role waits on I/O (Postgres, KataGo's pipes, sockets) —
+// the engine's work happens in the KataGo process. Anything that blocks must go
+// through `spawn_blocking` (see `blocking`), and `block_in_place` would panic.
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> muxa::Result<()> {
     let role = Role::resolve();
     // The probe runs every few seconds; keep it quiet and dependency-free.

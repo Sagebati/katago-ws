@@ -111,11 +111,12 @@ struct Session {
     sink: SplitSink<WsStream, Message>,
     /// Orchestrator→worker stream of pushed jobs.
     stream: SplitStream<WsStream>,
-    /// Finished analyses post their [`ClientMsg::Result`] here; the serving loop
+    /// Finished analyses post their [`ClientMsg::Result`] here, already encoded
+    /// (it's a full analysis payload: encoded off the runtime); the serving loop
     /// drains it to the sink.
-    out_tx: mpsc::Sender<ClientMsg>,
+    out_tx: mpsc::Sender<String>,
     /// Receiver half drained by the serving loop.
-    out_rx: mpsc::Receiver<ClientMsg>,
+    out_rx: mpsc::Receiver<String>,
 }
 
 impl WorkerClient {
@@ -185,11 +186,10 @@ impl WorkerClient {
             tokio::select! {
                 () = self.shutdown.cancelled() => return State::Stopped,
                 outbound = out_rx.recv() => {
-                    if let Some(message) = outbound {
-                        let Ok(text) = serde_json::to_string(&message) else { continue };
-                        if sink.send(Message::Text(text.into())).await.is_err() {
-                            return State::Backoff;
-                        }
+                    if let Some(text) = outbound
+                        && sink.send(Message::Text(text.into())).await.is_err()
+                    {
+                        return State::Backoff;
                     }
                 }
                 inbound = stream.next() => match inbound {
@@ -242,7 +242,7 @@ impl WorkerClient {
         })?;
         sink.send(Message::Text(hello.into())).await?;
 
-        let (out_tx, out_rx) = mpsc::channel::<ClientMsg>(self.slots as usize + 1);
+        let (out_tx, out_rx) = mpsc::channel::<String>(self.slots as usize + 1);
         Ok(Session {
             sink,
             stream,
@@ -253,7 +253,7 @@ impl WorkerClient {
 
     /// Accept one job: take a slot (back-pressuring the inbound read), then run the
     /// analysis off-loop and post the result to the outbound channel.
-    async fn dispatch(&self, job: JobRequest, out_tx: &mpsc::Sender<ClientMsg>) {
+    async fn dispatch(&self, job: JobRequest, out_tx: &mpsc::Sender<String>) {
         let job_id = job.job_id;
         // If every slot is busy this parks until one frees — log it so a lull where
         // a job arrived but hasn't started is visible rather than silent.
@@ -295,18 +295,25 @@ impl WorkerClient {
                 }
             }
             let reply = ClientMsg::Result { job_id, outcome };
+            let Ok(text) = crate::blocking::offload(move || serde_json::to_string(&reply)).await
+            else {
+                tracing::error!(%job_id, "result frame failed to serialize");
+                return;
+            };
             // Best-effort: if the session is gone, the pgmq lease redelivers.
-            drop(out_tx.send(reply).await);
+            drop(out_tx.send(text).await);
         });
     }
 
     /// Run one job through the local engine, mapping the result into the wire form.
     async fn run_job(engine: &AnalysisEngine, sgf: &str, human_profile: Option<&str>) -> Outcome {
         match engine.analyze(sgf, human_profile).await {
-            Ok(analysis) => match serde_json::to_value(&analysis) {
-                Ok(value) => Outcome::Ok(value),
-                Err(err) => Outcome::Err(format!("serialize analysis: {err}")),
-            },
+            Ok(analysis) => {
+                match crate::blocking::offload(move || serde_json::to_value(&analysis)).await {
+                    Ok(value) => Outcome::Ok(value),
+                    Err(err) => Outcome::Err(format!("serialize analysis: {err}")),
+                }
+            }
             Err(err) => Outcome::Err(err.to_string()),
         }
     }

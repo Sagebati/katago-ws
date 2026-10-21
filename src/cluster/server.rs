@@ -156,7 +156,9 @@ async fn run_session(
                 None => break, // every lease loop exited (shutdown)
             },
             inbound = stream.next() => match inbound {
-                Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMsg>(&text) {
+                // A result frame carries a whole analysis (up to ~2 MB): parse it
+                // off the runtime.
+                Some(Ok(Message::Text(text))) => match crate::blocking::offload(move || serde_json::from_str::<ClientMsg>(&text)).await {
                     Ok(ClientMsg::Result { job_id, outcome }) => complete_job(&pending, job_id, outcome).await,
                     Ok(ClientMsg::Hello { .. }) => {} // stray Hello — ignore
                     Err(err) => tracing::warn!(%err, "worker sent an unparseable frame"),
