@@ -121,23 +121,57 @@ pub async fn worker_loop<E: Executor>(
                 tracing::info!("analysis worker shutting down");
                 break;
             }
-            res = queue::read_one(&db, queue::Queue::Analysis, cfg.visibility_timeout_secs, poll) => {
+            // Idle polls aren't traced: one every `poll` per loop would swamp Sentry.
+            res = crate::trace::untraced(
+                queue::read_one(&db, queue::Queue::Analysis, cfg.visibility_timeout_secs, poll),
+            ) => {
                 match res {
                     Ok(Some(msg)) => {
                         let msg_id = msg.msg_id;
+                        // Time from enqueue to this delivery. On a redelivery it
+                        // includes the earlier attempts, so only a first delivery
+                        // feeds the queue-wait metric.
+                        let receive_latency = (chrono::Utc::now() - msg.enqueued_at)
+                            .to_std()
+                            .unwrap_or_default();
+                        if msg.read_ct == 1 {
+                            crate::metrics::metrics().job_queue_wait(receive_latency.as_secs_f64());
+                        }
                         // One trace (a Sentry transaction) per delivery: lease,
                         // analysis and the result writes as child spans. A root
-                        // span on purpose: under the long-lived `muxa.task` span
-                        // it would be a child of a transaction that only ends at
-                        // shutdown, and never reach Sentry on its own.
-                        let span = tracing::info_span!(
-                            parent: None,
-                            "analysis_job",
-                            job_id = %msg.message.job_id,
-                            msg_id,
-                            attempt = msg.read_ct,
-                        );
-                        if let Err(err) = handle(&db, &executor, &cfg, msg).instrument(span).await {
+                        // span on purpose — and in a new trace — since under the
+                        // long-lived `muxa.task` span it would be a child of a
+                        // transaction that only ends at shutdown.
+                        let job = async {
+                            let span = tracing::info_span!(
+                                parent: None,
+                                "analysis_job",
+                                sentry.op = "queue.task",
+                                job_id = %msg.message.job_id,
+                                msg_id,
+                                attempt = msg.read_ct,
+                            );
+                            // The `queue.process` span and its `messaging.*` data
+                            // feed Sentry's Queues view (wait time, processing
+                            // time, retries). Created inside the job span's
+                            // future: the Sentry bridge parents a span on the span
+                            // entered when it is created.
+                            let process = async {
+                                let span = tracing::info_span!(
+                                    "queue.process",
+                                    sentry.op = "queue.process",
+                                    messaging.system = "pgmq",
+                                    messaging.destination.name = queue::Queue::Analysis.as_str(),
+                                    messaging.message.id = msg_id,
+                                    messaging.message.retry.count = msg.read_ct - 1,
+                                    messaging.message.receive.latency =
+                                        receive_latency.as_millis() as u64,
+                                );
+                                handle(&db, &executor, &cfg, msg).instrument(span).await
+                            };
+                            process.instrument(span).await
+                        };
+                        if let Err(err) = crate::trace::in_new_trace(job).await {
                             tracing::error!(error = %err, msg_id, "job processing failed");
                         }
                     }
@@ -252,9 +286,8 @@ impl VtHeartbeat {
                 tokio::select! {
                     () = child.cancelled() => break,
                     () = tokio::time::sleep(interval) => {
-                        if let Err(err) =
-                            queue::extend_vt(&pool, queue::Queue::Analysis, msg_id, vt_secs).await
-                        {
+                        let extend = queue::extend_vt(&pool, queue::Queue::Analysis, msg_id, vt_secs);
+                        if let Err(err) = crate::trace::untraced(extend).await {
                             tracing::warn!(msg_id, error = %err, "failed to extend visibility timeout");
                         }
                     }

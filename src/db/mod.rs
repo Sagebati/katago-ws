@@ -16,10 +16,11 @@ pub mod status;
 use diesel::{
     ExpressionMethods as _, OptionalExtension as _, QueryDsl as _, SelectableHelper as _,
 };
-use diesel_async::{AsyncConnection as _, RunQueryDsl as _};
+use diesel_async::{AsyncConnection as _, AsyncPgConnection, RunQueryDsl as _};
 use muxa::prelude::DieselPool;
 use pgmq::queue::Queue as _;
 use serde_json::Value as Json;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use crate::db::models::{Job, JobSummary};
@@ -68,13 +69,31 @@ pub async fn submit(pool: &DieselPool, job: NewJob) -> AppResult<Uuid> {
             .returning(jobs::id)
             .get_result(conn)
             .await?;
-        // No headers, no delay.
-        conn.send(Queue::Analysis.as_str(), job.into_message(job_id), (), 0)
-            .await
-            .map_err(|err| AppError::Queue(err.to_string()))?;
+        publish(conn, job.into_message(job_id)).await?;
         Ok(job_id)
     })
     .await
+}
+
+/// Enqueue one job's message on the caller's connection (inside its
+/// transaction), under a `queue.publish` span: Sentry's Queues view pairs it with
+/// the worker's `queue.process` span by message id.
+async fn publish(conn: &mut AsyncPgConnection, message: JobMessage) -> AppResult<()> {
+    let span = tracing::info_span!(
+        "queue.publish",
+        sentry.op = "queue.publish",
+        messaging.system = "pgmq",
+        messaging.destination.name = Queue::Analysis.as_str(),
+        messaging.message.id = tracing::field::Empty,
+    );
+    // No headers, no delay.
+    let msg_id = conn
+        .send(Queue::Analysis.as_str(), message, (), 0)
+        .instrument(span.clone())
+        .await
+        .map_err(|err| AppError::Queue(err.to_string()))?;
+    span.record("messaging.message.id", msg_id);
+    Ok(())
 }
 
 /// Submit several jobs at once, in **one** transaction: every SGF gets a row and
@@ -92,9 +111,7 @@ pub async fn submit_many(pool: &DieselPool, jobs: Vec<NewJob>) -> AppResult<Vec<
                 .returning(jobs::id)
                 .get_result(conn)
                 .await?;
-            conn.send(Queue::Analysis.as_str(), job.into_message(job_id), (), 0)
-                .await
-                .map_err(|err| AppError::Queue(err.to_string()))?;
+            publish(conn, job.into_message(job_id)).await?;
             ids.push(job_id);
         }
         Ok(ids)

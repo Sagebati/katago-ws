@@ -5,11 +5,13 @@
 //! unset), `global::meter` returns a no-op meter, so every instrument is a no-op
 //! and recording costs ~nothing — safe to call unconditionally from any role.
 //!
-//! Six instruments, matching the operational questions:
+//! Seven instruments, matching the operational questions:
 //! - `katago_ws.workers.connected` — gauge: cluster workers with a live session.
 //! - `katago_ws.jobs.waiting`       — gauge: jobs queued and waiting to run.
 //! - `katago_ws.jobs.processed`     — counter (by `outcome`): job throughput.
 //! - `katago_ws.job.duration`       — histogram (seconds, by `outcome`): time per job.
+//! - `katago_ws.job.queue_wait`     — histogram (seconds): time a job sat queued
+//!   before its first delivery — the wait a client sees on top of the analysis.
 //! - `katago_ws.moves.analyzed`     — counter: moves in completed analyses. Its
 //!   rate is the service's throughput — jobs/s isn't, game lengths vary too much.
 //! - `katago_ws.positions.analyzed` — counter (by `pass` ∈ {full, screen,
@@ -41,6 +43,7 @@ const NAME_WORKERS: &str = "katago_ws.workers.connected";
 const NAME_WAITING: &str = "katago_ws.jobs.waiting";
 const NAME_PROCESSED: &str = "katago_ws.jobs.processed";
 const NAME_DURATION: &str = "katago_ws.job.duration";
+const NAME_QUEUE_WAIT: &str = "katago_ws.job.queue_wait";
 const NAME_MOVES: &str = "katago_ws.moves.analyzed";
 const NAME_POSITIONS: &str = "katago_ws.positions.analyzed";
 
@@ -62,6 +65,8 @@ pub struct Metrics {
     jobs_processed: Counter<u64>,
     /// Wall-clock seconds spent analyzing one job, tagged `outcome`.
     job_duration: Histogram<f64>,
+    /// Seconds a job waited in the queue before its first delivery.
+    job_queue_wait: Histogram<f64>,
     /// Moves in successfully completed analyses.
     moves_analyzed: Counter<u64>,
     /// Positions KataGo searched, tagged `pass`. Recorded where the engine runs
@@ -104,6 +109,14 @@ impl Metrics {
 }
 
 impl Metrics {
+    /// Record how long a job waited in the queue before a worker picked it up.
+    pub fn job_queue_wait(&self, secs: f64) {
+        self.job_queue_wait.record(secs, &[]);
+        sentry::metrics::distribution(NAME_QUEUE_WAIT, secs)
+            .unit("second")
+            .capture();
+    }
+
     /// Record the moves of one successfully analyzed game.
     pub fn moves_analyzed(&self, moves: u64) {
         self.moves_analyzed.add(moves, &[]);
@@ -144,6 +157,15 @@ pub fn metrics() -> &'static Metrics {
                 .with_description("Wall-clock time to analyze one job")
                 // Buckets tuned for seconds-to-minutes KataGo analyses.
                 .with_boundaries(vec![0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0])
+                .build(),
+            job_queue_wait: meter
+                .f64_histogram(NAME_QUEUE_WAIT)
+                .with_unit("s")
+                .with_description("Time a job waited in the queue before its first delivery")
+                // From an idle worker's poll (sub-second) to a backlog (hours).
+                .with_boundaries(vec![
+                    0.1, 0.5, 1.0, 5.0, 15.0, 60.0, 300.0, 900.0, 3600.0, 14400.0,
+                ])
                 .build(),
             moves_analyzed: meter
                 .u64_counter(NAME_MOVES)

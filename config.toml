@@ -26,15 +26,30 @@ timeout_secs = 10
 metric_interval_secs = 60
 
 [sentry]
-# Leave dsn empty for local dev → Sentry runs as a no-op client.
+# Leave dsn empty for local dev → Sentry runs as a no-op client. In production
+# set KATAGO_WS_SENTRY__DSN (or the SDK's own SENTRY_DSN).
 dsn = ""
-# environment + traces_sample_rate are intentionally unset: muxa derives both
-# from the run mode (see `env` above). development → environment "development",
-# sample rate 1.0; production → "production", 0.1. Override either via
-# KATAGO_WS_SENTRY__ENVIRONMENT / KATAGO_WS_SENTRY__TRACES_SAMPLE_RATE.
+# environment is intentionally unset: muxa derives it from the run mode (see
+# `env` above). Override via KATAGO_WS_SENTRY__ENVIRONMENT.
+#
+# Trace every transaction (muxa's production default is 0.1): this is a
+# low-traffic service where each analysis job is one trace, and a slow job is
+# exactly the one worth seeing. The two high-frequency, uninteresting
+# transactions are thinned below instead. Lower it with
+# KATAGO_WS_SENTRY__TRACES_SAMPLE_RATE if traffic grows.
+traces_sample_rate = 1.0
 # logs: INFO/WARN/ERROR tracing events are also shipped to Sentry's Logs product
 # (on by default once a DSN is set). Set logs = false to disable.
 # logs = true
+
+# Per-transaction sample rates (exact names: `METHOD /route`), overriding
+# traces_sample_rate. A request continuing a caller's trace keeps the caller's
+# decision.
+[sentry.transaction_sample_rates]
+# The Docker HEALTHCHECK probe, every 15 s.
+"GET /healthz" = 0.0
+# Clients poll the change feed every few seconds; a sample is plenty.
+"GET /analyses/changes" = 0.02
 
 [diesel]
 # Override with KATAGO_WS_DIESEL__URL in deployment.

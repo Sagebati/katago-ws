@@ -32,6 +32,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::http;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tracing::Instrument as _;
 
 use crate::cluster::message::{ClientMsg, JobRequest, Outcome};
 use crate::config::WorkerConfig;
@@ -269,7 +270,21 @@ impl WorkerClient {
         tokio::spawn(async move {
             let _permit = permit; // released when the analysis finishes
             let started = std::time::Instant::now();
-            let outcome = Self::run_job(&engine, &job.sgf, job.human_profile.as_deref()).await;
+            // The worker's half of the job trace: continues the orchestrator's
+            // (`sentry.trace`), or starts its own when none was sent.
+            let run = async {
+                let span = tracing::info_span!(
+                    parent: None,
+                    "cluster.job",
+                    sentry.op = "queue.task",
+                    sentry.trace = job.trace.as_deref(),
+                    %job_id,
+                );
+                Self::run_job(&engine, &job.sgf, job.human_profile.as_deref())
+                    .instrument(span)
+                    .await
+            };
+            let outcome = crate::trace::in_new_trace(run).await;
             let elapsed_ms = started.elapsed().as_millis() as u64;
             match &outcome {
                 Outcome::Ok(_) => {
