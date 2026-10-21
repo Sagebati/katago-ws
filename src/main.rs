@@ -24,12 +24,17 @@
 //!   engine roles then start from the cache. `--fast` = the under-30 s search;
 //!   `--force` re-tunes even when a cached result exists.
 //!
+//! The engine roles also take flags for the common `[engine]` / `[worker]` keys
+//! (`katago-ws worker --threads 8 --slots 4`; `--help` lists them), layered over
+//! the config file and env — see [`cli`].
+//!
 //! `orchestrator` + N `worker`s let the two tiers scale independently when the
 //! workers can't reach Postgres directly (the queue lease still lives on the
 //! orchestrator, so a worker crash is redelivered exactly as a local crash is).
 
 mod auth;
 mod bench;
+mod cli;
 mod cluster;
 mod config;
 mod db;
@@ -44,11 +49,13 @@ mod worker;
 
 use std::sync::Arc;
 
+use muxa::HNil;
 use muxa::prelude::*;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use crate::cli::Role;
 use crate::config::{ApiConfig, OrchestratorConfig, WorkerConfig};
 use crate::engine::{AnalysisEngine, AutotunePlugin, KataGoEnginePlugin};
 
@@ -57,69 +64,35 @@ use crate::engine::{AnalysisEngine, AutotunePlugin, KataGoEnginePlugin};
 /// that own the database (`standalone`/`orchestrator`).
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 
-/// Which slice of the system this process runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Role {
-    /// Web + in-process workers (default).
-    Standalone,
-    /// Web + pgmq + cluster WebSocket dispatcher; no engine.
-    Orchestrator,
-    /// Engine + cluster WebSocket client; no Postgres.
-    Worker,
-    /// Engine only: throughput benchmark over an SGF corpus, then exit.
-    Bench,
-    /// Probe this instance's `GET /healthz`, then exit (Docker `HEALTHCHECK`).
-    Healthcheck,
-    /// Auto-tune KataGo's throughput settings into the cache, then exit.
-    Autotune,
-}
-
-impl Role {
-    /// Resolve the launch role: the first CLI argument wins; if it's absent, the
-    /// `KATAGO_WS_ROLE` environment variable is consulted (handy where setting
-    /// argv is awkward — e.g. a compose service that keeps the image's
-    /// `ENTRYPOINT`); if neither is set, [`Role::Standalone`].
-    fn resolve() -> Result<Self, String> {
-        let raw = std::env::args()
-            .nth(1)
-            .or_else(|| std::env::var("KATAGO_WS_ROLE").ok());
-        match raw.as_deref() {
-            None | Some("standalone") => Ok(Self::Standalone),
-            Some("orchestrator") => Ok(Self::Orchestrator),
-            Some("worker") => Ok(Self::Worker),
-            Some("bench") => Ok(Self::Bench),
-            Some("healthcheck") => Ok(Self::Healthcheck),
-            Some("autotune") => Ok(Self::Autotune),
-            Some(other) => Err(format!(
-                "unknown role {other:?}; expected one of: standalone, orchestrator, worker, bench, \
-                 healthcheck, autotune"
-            )),
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() -> muxa::Result<()> {
-    let role = Role::resolve().map_err(Error::other)?;
+    let role = Role::resolve();
     // The probe runs every few seconds; keep it quiet and dependency-free.
-    if role == Role::Healthcheck {
+    if let Role::Healthcheck = role {
         return run_healthcheck().await;
     }
-    tracing::info!(?role, "starting katago-ws");
+    tracing::info!(role = role.name(), "starting katago-ws");
+    let app = app(&role);
     match role {
-        Role::Standalone => run_standalone().await,
-        Role::Orchestrator => run_orchestrator().await,
-        Role::Worker => run_worker().await,
-        Role::Bench => run_bench().await,
+        Role::Standalone { .. } => run_standalone(app).await,
+        Role::Orchestrator => run_orchestrator(app).await,
+        Role::Worker { .. } => run_worker(app).await,
+        Role::Bench { .. } => run_bench(app).await,
         Role::Healthcheck => run_healthcheck().await,
-        Role::Autotune => run_autotune().await,
+        Role::Autotune { fast, force, .. } => run_autotune(app, fast, force).await,
     }
+}
+
+/// `muxa::app!()` — the config file merged with `KATAGO_WS_*` env — with the
+/// role's flags merged over both.
+fn app(role: &Role) -> AppBuilder<HNil> {
+    App::with_figment(muxa::load_figment(env!("CARGO_PKG_NAME")).merge(role.overrides()))
 }
 
 /// `standalone`: the original single-process deployment — web API and in-process
 /// workers sharing one Postgres/pgmq.
-async fn run_standalone() -> muxa::Result<()> {
-    let app = muxa::app!()
+async fn run_standalone(app: AppBuilder<HNil>) -> muxa::Result<()> {
+    let app = app
         .with_plugin(SentryPlugin)
         .await?
         .with_plugin(OtelPlugin)
@@ -158,8 +131,8 @@ async fn run_standalone() -> muxa::Result<()> {
 
 /// `orchestrator`: web API + pgmq + the cluster WebSocket dispatcher; no engine.
 /// Owns the DB and proxies work to remote workers.
-async fn run_orchestrator() -> muxa::Result<()> {
-    let app = muxa::app!()
+async fn run_orchestrator(app: AppBuilder<HNil>) -> muxa::Result<()> {
+    let app = app
         .with_plugin(SentryPlugin)
         .await?
         .with_plugin(OtelPlugin)
@@ -200,8 +173,8 @@ async fn run_orchestrator() -> muxa::Result<()> {
 
 /// `worker`: KataGo engine + cluster WebSocket client dialing the orchestrator; no
 /// Postgres. Serves only `/healthz` so `App::run` has a serve loop and probes have a target.
-async fn run_worker() -> muxa::Result<()> {
-    let app = muxa::app!()
+async fn run_worker(app: AppBuilder<HNil>) -> muxa::Result<()> {
+    let app = app
         .with_plugin(SentryPlugin)
         .await?
         .with_plugin(OtelPlugin)
@@ -223,8 +196,8 @@ async fn run_worker() -> muxa::Result<()> {
 
 /// `bench`: launch KataGo, run the throughput benchmark, exit. No telemetry
 /// export, DB, or web server — only the engine is under test.
-async fn run_bench() -> muxa::Result<()> {
-    let app = muxa::app!().with_plugin(KataGoEnginePlugin).await?;
+async fn run_bench(app: AppBuilder<HNil>) -> muxa::Result<()> {
+    let app = app.with_plugin(KataGoEnginePlugin).await?;
     let engine = Arc::clone(Selector::<Arc<AnalysisEngine>, _>::select(app.state()));
     // The engine's own copy: it carries the auto-tuned settings.
     let engine_cfg = engine.config().clone();
@@ -236,23 +209,8 @@ async fn run_bench() -> muxa::Result<()> {
 
 /// `autotune [--fast] [--force]`: tune KataGo for this host into the cache
 /// (`[engine] autotune_cache`) and exit, so the engine roles start from it.
-async fn run_autotune() -> muxa::Result<()> {
-    let mut plugin = AutotunePlugin {
-        fast: false,
-        force: false,
-    };
-    for flag in std::env::args().skip(2) {
-        match flag.as_str() {
-            "--fast" => plugin.fast = true,
-            "--force" => plugin.force = true,
-            other => {
-                return Err(Error::other(format!(
-                    "unknown autotune flag {other:?}; expected --fast and/or --force"
-                )));
-            }
-        }
-    }
-    muxa::app!().with_plugin(plugin).await?;
+async fn run_autotune(app: AppBuilder<HNil>, fast: bool, force: bool) -> muxa::Result<()> {
+    app.with_plugin(AutotunePlugin { fast, force }).await?;
     Ok(())
 }
 

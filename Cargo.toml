@@ -90,6 +90,15 @@ chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 tracing = "0.1"
 
+# Command line: the role subcommand and the flags that override `[engine]` /
+# `[worker]` keys (see `src/cli.rs`). Exact-pinned to 4.6.3, the last clap whose
+# derive macro is on syn 2: from 4.6.4 it pulls syn 3, a second copy of the
+# heaviest proc-macro dependency in the graph (`cargo tree -d`).
+clap = { version = "=4.6.3", features = ["derive"] }
+# The flags reach the config as one more figment layer, over the file and env
+# muxa loads. Same 0.10 line as muxa-core, so it is one figment in the graph.
+figment = { version = "0.10", default-features = false }
+
 # Release profile. The crate had none → cargo defaults (no LTO, 16 codegen units,
 # unstripped) produced a ~25 MB binary. The wins here are pure size/throughput with
 # no behaviour change:
