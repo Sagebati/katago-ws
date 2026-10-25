@@ -1,9 +1,10 @@
-# Build context is the PARENT dir (contains katago-ws, muxa, pgmq).
-# Ignore everything, then re-include only the three crates we build from,
-# minus their heavy build/VCS artifacts.
+# Build context is the PARENT dir (contains katago-ws, katago-rs, muxa, pgmq).
+# Ignore everything, then re-include only the four repos we build from, minus
+# their heavy build/VCS artifacts.
 *
 
 !katago-ws
+!katago-rs
 !muxa
 !pgmq
 
@@ -11,3 +12,14 @@
 **/.git
 **/*.log
 **/analysis_logs
+# katago-ws: the local bench corpus, models and KataGo builds (gitignored).
+katago-ws/bench
+# katago-rs: only its crates, third_party and tools/bin2onnx are built from;
+# the nets are converted in the image (Dockerfile `nets` stage).
+katago-rs/.venv
+katago-rs/build
+katago-rs/models
+katago-rs/packages
+katago-rs/upstream
+katago-rs/fixtures
+katago-rs/crates/katago-web-bench/www
