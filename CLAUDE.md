@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `katago-ws` is a queued SGF (Go game record) analysis microservice. `POST /analyse`
 validates an SGF, persists a job, and enqueues it; a background worker replays the
-game through a [KataGo](https://github.com/lightvector/KataGo) analysis subprocess,
+game through a [katago-rs](https://github.com/Sagebati/katago-rs) analysis subprocess
+(a Rust port of [KataGo](https://github.com/lightvector/KataGo)'s analysis engine,
+speaking its JSON protocol; CPU, Vulkan or ROCm),
 annotates every move, and stores the result. Clients read status via `GET
 /analyse/{id}` (optionally long-polling with `?wait=`), list jobs, or tail a live
 SSE feed.
@@ -29,8 +31,8 @@ present (at the `MUXA_REF` in `.github/sibling-refs.env`).
 # Run (role = first CLI arg; default `standalone`). Needs Postgres — see below.
 cargo run                      # standalone: web + in-process workers
 cargo run -- orchestrator      # web + pgmq + cluster dispatcher, no engine
-cargo run -- worker            # KataGo + cluster client, no Postgres
-cargo run --release -- bench   # KataGo only: throughput benchmark, then exit
+cargo run -- worker            # engine + cluster client, no Postgres
+cargo run --release -- bench   # engine only: throughput benchmark, then exit
 
 cargo build                    # CI/Docker use `cargo build --release --locked`
 cargo clippy                   # lints are enforced — see Conventions
@@ -41,7 +43,7 @@ cargo test                     # works too (single package, no workspace here)
 
 Tests are unit tests colocated in `src/**` (`engine/sgf.rs`, `engine/annotate.rs`,
 `http/handlers.rs`, `cluster/{registry,server}.rs`). There is no separate
-`tests/` dir; none require a live DB or KataGo.
+`tests/` dir; none require a live DB or katago-rs.
 
 ### Database
 
@@ -54,9 +56,9 @@ The schema is one `jobs` table plus pgmq's own tables in the `pgmq` schema.
 ### Local stack & images
 
 ```bash
-docker compose up --build      # Postgres + the app (CPU KataGo + model bundled, no GPU)
-just cpu | just cuda | just opencl   # build a per-platform image (run from katago-ws/;
-                                     # build context is the PARENT dir for the path-deps)
+docker compose up --build      # Postgres + the app (katago-rs on CPU + b10 net bundled, no GPU)
+just cpu | just vulkan | just rocm   # build a per-platform image (run from katago-ws/;
+                                     # build context is the PARENT dir for the siblings)
 ```
 
 If you change the sibling `muxa` framework, it does **not** build standalone —
@@ -79,9 +81,9 @@ field on `EngineArgs`/`WorkerArgs` named after its config key:
   Postgres/pgmq. The original single-process deployment.
 - **`orchestrator`** — web API + pgmq + the cluster dispatcher; **no engine**.
   Owns the DB and proxies work to remote workers.
-- **`worker`** — runs KataGo and dials the orchestrator; **no Postgres**. Serves
+- **`worker`** — runs the engine and dials the orchestrator; **no Postgres**. Serves
   only `/healthz`.
-- **`bench`** — KataGo only (no Postgres, no web): analyzes an SGF directory at
+- **`bench`** — engine only (no Postgres, no web): analyzes an SGF directory at
   a fixed concurrency and writes a JSON report ([`src/bench.rs`](src/bench.rs)).
 - **`autotune [--fast] [--force]`** — runs the startup auto-tune once into its
   cache and exits (see "Startup auto-tune" below).
@@ -132,7 +134,7 @@ analysis isn't redelivered mid-run. See [`src/worker.rs`](src/worker.rs).
 
 `worker_loop` (pgmq lease + heartbeat + guarded writes) is **identical** for local
 and remote execution; only the [`Executor`](src/worker.rs) trait impl differs —
-`LocalExecutor` runs KataGo in-process; the orchestrator runs the same loop per
+`LocalExecutor` runs the engine in-process; the orchestrator runs the same loop per
 connected worker with a remote executor that ships the SGF over the cluster socket.
 The unit of work is one coarse `analyze(sgf) → GameAnalysis JSON` call.
 
@@ -162,75 +164,77 @@ hasn't committed (sequence numbers are taken at write time, not commit time).
 
 ### Engine
 
-[`src/engine/`](src/engine/mod.rs): `KataGoEnginePlugin` launches `katago analysis
--config <cfg> -model <model>` as a long-lived subprocess and shares it as
-`Arc<AnalysisEngine>`. `analyze` = parse SGF (`engine/sgf.rs`) → drive KataGo over
-JSON (`engine/katago.rs`) → annotate moves (`engine/annotate.rs`).
+[`src/engine/`](src/engine/mod.rs): `KataGoEnginePlugin` launches `katago-rs analysis
+-backend <flex|wgpu|rocm> -config <cfg> -model <model.bpk>` as a long-lived subprocess
+and shares it as `Arc<AnalysisEngine>`. katago-rs compiles its nets in: `-model` is a
+`.bpk` whose file stem names one of them. `[engine] fp16` adds `burnUseFP16=true` to
+the overrides (GPU backends). `analyze` = parse SGF (`engine/sgf.rs`) → drive the
+engine over KataGo's analysis JSON (`engine/katago.rs`) → annotate moves
+(`engine/annotate.rs`). The payload's `engine` names `katago-rs`, the KataGo version
+from `<binary> version` (read once at startup) and the net's name.
 The payload is `payload_version` 3 (README "The analysis payload"): per-turn
 `ownership`/`ownership_stdev`/`policy` grids, and `human_policy` when a job names a
 `human_profile` (validated at submit, `engine/human.rs`) and the worker has
 `[engine] human_model` (`-human-model`). The profile rides the pgmq message and the
 cluster `JobRequest` as an optional field, and goes in the query's
-`overrideSettings.humanSLProfile` — never the outer object, and never to a KataGo
+`overrideSettings.humanSLProfile` — never the outer object, and never to an engine
 without a human model (it fails the whole query; the engine drops the profile
 with a warning instead).
 
 ### Benchmarking the worker
 
-`scripts/bench_setup.sh` fills the gitignored `bench/` (KataGo release binary,
-models, an OGS game corpus). `just bench LABEL [katagoKey=value …] [env.KATAGO_WS_X=…]`
-runs one benchmark against a derived KataGo config (`just bench-quick` = 6 games,
+`scripts/bench_setup.sh` fills the gitignored `bench/` (katago-rs built from the
+sibling `../katago-rs` with flex, wgpu and — when ROCm's HIP runtime is installed — rocm, its
+nets as `.bpk`, an OGS game corpus). `just bench LABEL [cfgKey=value …] [env.KATAGO_WS_X=…]`
+runs one benchmark against a derived analysis config (`just bench-quick` = 6 games,
 ~1 min, for fast A/B; `just bench-prod` = ~300 games, ~45 min, for final numbers;
-`just bench-models` = one run per model in `bench/models/`); `scripts/bench_compare.py
-BASE.json RUN.json…` tabulates throughput and the per-move evaluation drift vs a
-base run (benchmark the base twice to see the MCTS noise floor). The worker is
-GPU-bound: the Rust side is ~0% CPU, so throughput comes from KataGo's settings —
-positions in parallel (`[engine] analysis_threads`, 1 search thread each),
-`nn_server_threads` × `nn_max_batch_size`, and the OpenCL device/driver. Stock
-KataGo's OpenCL backend shares one in-order command queue across NN server
-threads, which caps one process well below the GPU's capacity;
-[`patches/`](patches/) has a per-thread-queue fix (upstream: lightvector/KataGo#1267).
+`just bench-models` = one run per model in `bench/models/`); `BENCH_BACKEND` picks the
+backend (default rocm, else wgpu; b18c384nbt in f16 on a GPU, b10c128 on flex).
+`scripts/bench_compare.py BASE.json RUN.json…` tabulates throughput and the per-move
+evaluation drift vs a base run (benchmark the base twice to see the MCTS noise floor).
+The worker is GPU-bound: the Rust side is ~0% CPU, so throughput comes from the engine's
+settings — positions in parallel (`[engine] analysis_threads`, 1 search thread each)
+and `nn_server_threads` × `nn_max_batch_size`. katago-rs's analysis engine runs its
+search on one OS thread (its wasm design) with the GPU readback on a helper thread;
+several NN server threads keep more batches in flight, which is what saturates the
+GPU (RX 6800 XT, ROCm, b18c384nbt, 100 visits: 13.4 positions/s at 8×64 with 256
+analysis threads, against stock KataGo OpenCL's 7.1).
 
 ### Startup auto-tune (`[engine] autotune`, on by default)
 
-Every role that launches KataGo (`standalone`, `worker`, `bench`) first runs
+Every role that launches the engine (`standalone`, `worker`, `bench`) first runs
 [`engine::autotune`](src/engine/autotune/mod.rs) from `KataGoEnginePlugin`
 (whose `read_config` also reads `[worker].concurrency` and which tuning fields
-were set explicitly). Each candidate is a fresh KataGo fed an embedded 17-game
+were set explicitly). Each candidate is a fresh katago-rs fed an embedded 17-game
 corpus in 16-turn chunks at the queue depth of `[worker].concurrency` games;
 positions/s is read off a turn counter after a warm-up wave. It picks
-`nn_server_threads` × `nn_max_batch_size` (the build-dependent lever: stock
-OpenCL KataGo wants 4×64, the `patches/` build 8×32, KataGo's native ROCm/HIP
-backend 2×128; candidate order follows the backend `katago version` reports) and
-`analysis_threads`; `search_threads_per_analysis` is 1. On OpenCL it reads
-KataGo's device list from its startup log and pins a vendor runtime's device
-(ROCm "AMD Accelerated Parallel Processing") over Mesa rusticl on every server
-thread. Eigen (CPU) builds skip it.
+`nn_server_threads` × `nn_max_batch_size` (candidate order from `[engine] backend`:
+rocm's usual winner is 8×64, wgpu's 4×64) and `analysis_threads`;
+`search_threads_per_analysis` is 1. The CPU backend (flex) skips it.
 - **Modes** (`[engine] autotune_mode`): `thorough` (default,
   [`thorough.rs`](src/engine/autotune/thorough.rs): every server×batch
   candidate, then 256/128/512 analysis threads, near-ties re-measured; ~1–1.5 min)
   or `fast` ([`fast.rs`](src/engine/autotune/fast.rs), under ~30 s: positions in
   flight from the GPU's SIMD lanes — AMD KFD topology, else `clinfo` — capped by
   the queue depth; only the server-thread split is searched, on a 1/2/4/8/16
-  ladder capped at the CPU count, from the backend's usual winner; two trials,
+  ladder, from the backend's usual winner; two trials,
   more only within a 25 s budget). A cached `thorough` result satisfies `fast`.
 - **One-shot**: `katago-ws autotune [--fast] [--force]` (`just autotune --fast`)
   tunes into the cache and exits (`AutotunePlugin`).
 - **Precedence**: tuning fields given explicitly in the config file or env, and
   any key in `override_config`, are pinned — never changed; only the rest are
-  tuned, and the results are written back into the `[engine]` fields (the device
-  keys into `override_config`), so `EngineConfig::katago_overrides()` still
+  tuned, and the results are written back into the `[engine]` fields, so
+  `EngineConfig::katago_overrides()` still
   builds the argument. Built-in defaults (`analysis_threads` = CPU count) and an
   explicit `0` don't pin.
-- **Cache**: `[engine] autotune_cache` (default `~/.katago/katago-ws-autotune.json`,
-  beside KataGo's `opencltuning/`), keyed by GPU PCI ids + OpenCL ICDs, KataGo
-  binary/model/config (path, size, mtime), `max_visits`, board size, concurrency,
-  mode and the pinned keys. A hit skips tuning; delete the file to retune.
-- **Never blocks startup**: no GPU, KataGo dying, or exceeding
-  `autotune_timeout_secs` (300; a first run on a new GPU/model includes KataGo's
-  ~30–90 s OpenCL kernel tuning) logs a WARN and launches with the config as
+- **Cache**: `[engine] autotune_cache` (default `~/.katago/katago-ws-autotune.json`),
+  keyed by GPU PCI ids, the katago-rs binary/model/config (path, size, mtime),
+  backend, fp16, `max_visits`, board size, concurrency, mode and the pinned keys. A hit skips tuning; delete the file to retune.
+- **Never blocks startup**: no GPU, the engine dying, or exceeding
+  `autotune_timeout_secs` (300; a first run on a new GPU/model includes compiling
+  the GPU kernels) logs a WARN and launches with the config as
   given. `KATAGO_WS_ENGINE__AUTOTUNE=false` disables it.
-- **Docker**: persist `/home/app/.katago` (kernel tuning + the cache) in a volume.
+- **Docker**: persist `/home/app/.katago` (the cache) in a volume.
 - `scripts/bench.sh` runs with auto-tune off (`BENCH_AUTOTUNE=true` to bench the
   tuned settings), so derived-config A/B runs measure exactly what they say.
 
@@ -262,13 +266,14 @@ Four workflow files, each with a distinct job:
 - [`pr-title-lint.yml`](.github/workflows/pr-title-lint.yml) — advisory Conventional
   Commits check on PR titles (release-plz parses these under squash-merge).
 - [`image.yml`](.github/workflows/image.yml) — the **production-load-bearing** path:
-  builds + pushes rolling `:cpu`/`:cuda`/`:opencl`/`:latest`/`:<variant>-<sha>` images
+  builds + pushes rolling `:cpu`/`:vulkan`/`:rocm`/`:latest`/`:<variant>-<sha>` images
   on every push to `main`. Coolify's deploy tracks `:latest`. Don't touch this file
   casually — a break here is a break in production.
 - [`release.yml`](.github/workflows/release.yml) — tag-triggered (`v*.*.*`, pushed by
-  release-plz): compiles the binary **once** on the runner (not per-variant, unlike
-  `image.yml`), builds `:<variant>-vX.Y.Z` images from that prebuilt binary via the
-  Dockerfile's `runtime-prebuilt` target, and attaches a binary tarball + checksum to
+  release-plz): compiles the katago-ws binary **once** on the runner (not per-variant,
+  unlike `image.yml`), builds `:<variant>-vX.Y.Z` images from that prebuilt binary via
+  the Dockerfile's `runtime-prebuilt` target (katago-rs is still built per variant),
+  and attaches a binary tarball + checksum to
   the GitHub Release. Kept in its own file so it can break without risking `image.yml`.
 
 Plus [`release-plz.yml`](.github/workflows/release-plz.yml) (version bump / changelog
@@ -277,7 +282,7 @@ PR / tag+release, config in [`release-plz.toml`](release-plz.toml)) — runs on
 triggers for `GITHUB_TOKEN`-authored pushes and the `v*.*.*` tag it pushes must fire
 `release.yml`.
 
-**The `muxa`/`pgmq` sibling pins are one source of truth**:
+**The `muxa`/`pgmq`/`katago-rs` sibling pins are one source of truth**:
 [`.github/sibling-refs.env`](.github/sibling-refs.env), read by
 [`.github/actions/checkout-siblings/`](.github/actions/checkout-siblings/action.yml)
 (used by `ci.yml`, `image.yml`, and `release.yml`'s `build-binary` job — `muxa` used to
@@ -285,12 +290,17 @@ float on `ref: main`, which is why this exists). Bumping `muxa` is a one-line
 change there, not a per-workflow edit. The `pgmq` sibling is still checked out and
 copied into the image build context, but nothing path-depends on it any more (see
 the git dep above); keep `PGMQ_REF` equal to that rev until the checkout is removed.
+katago-rs is a private repo: the action checks it out over SSH with the
+`KATAGO_RS_DEPLOY_KEY` secret (a read-only deploy key on `Sagebati/katago-rs`) when
+given one; `ci.yml` doesn't need it (nothing compiles against katago-rs; it is only a
+subprocess). Bump `KATAGO_RS_REF` to ship a new engine.
 
-**The KataGo version + per-variant base/zip/pkgs trio live only in the
-[`justfile`](justfile)** (`katago_version` + `*_base`/`*_zip`/`*_pkgs`/`opencl_rusticl`
-vars). `just print-matrix` emits them as JSON; `image.yml` and `release.yml` both
-consume it via a small `matrix` job + `fromJson()` rather than hardcoding a second copy
-in YAML. Change the KataGo version in exactly one place: the justfile.
+**The per-variant image settings live only in the [`justfile`](justfile)**
+(`cpu_*` / `vulkan_*` / `rocm_*`: runtime base, packages, AMD apt repo, katago-rs
+features, backend, fp16, model). `just print-matrix` emits them as JSON; `image.yml`
+and `release.yml` both consume it via a small `matrix` job + `fromJson()` rather than
+hardcoding a second copy in YAML. The nets' download URLs are `NET_*_URL` args in the
+[`Dockerfile`](Dockerfile).
 
 ## Conventions
 

@@ -1,9 +1,11 @@
 //! The thorough search (`[engine] autotune_mode = "thorough"`, the default):
 //! every server×batch candidate for the backend, then `numAnalysisThreads`
-//! around the winner, re-measuring near-ties. ~1–1.5 min on a GPU; the fast
-//! search ([`super::fast`]) gets close in under ~30 s.
+//! around the winner, re-measuring near-ties. A few minutes on a GPU; the fast
+//! search ([`super::fast`]) gets close in a few trials.
 
 use std::future::Future;
+
+use crate::config::EngineBackend;
 
 use super::overrides::{ANALYSIS_THREADS, BATCH_SIZE, Overrides, SERVER_THREADS};
 use super::search::{Candidate, Outcome, Report};
@@ -14,18 +16,15 @@ use super::search::{Candidate, Outcome, Report};
 /// make a short measurement over-read them.
 const ANALYSIS_CANDIDATES: [u32; 3] = [256, 128, 512];
 
-/// OpenCL `numNNServerThreadsPerModel` × `nnMaxBatchSize` candidates (each
-/// ~256 positions per round of batches), in prior order: 4×64 is best on stock
-/// OpenCL KataGo (one in-order command queue shared by every server thread),
-/// 8×32 on a build with a queue per server thread (`patches/`). (3×96 was
-/// never close on OpenCL — stock 81 vs 88, patched 128 vs 155 — so it is
-/// only tried on the other backends.)
-const OPENCL_SERVER_BATCH: [(u32, u32); 4] = [(4, 64), (8, 32), (6, 48), (2, 128)];
+/// katago-rs on ROCm: `numNNServerThreadsPerModel` × `nnMaxBatchSize`
+/// candidates in prior order. katago-rs's NN server threads are tasks on its one
+/// search thread, so more of them means more batches in flight while the GPU
+/// works: on the RX 6800 XT (b18c384nbt, f16, 256 analysis threads) 8×64 did
+/// 13.4 positions/s, 4×96 13.0, 4×64 12.3.
+const ROCM_SERVER_BATCH: [(u32, u32); 4] = [(8, 64), (4, 96), (4, 64), (8, 32)];
 
-/// The same for the other GPU backends (ROCm/HIP, CUDA, TensorRT…): fewer,
-/// bigger batches win there — on the RX 6800 XT, KataGo's ROCm backend does
-/// 2×128 ≈ 3×96 > 4×64 > 8×32 (b10: 193/197/181/161 positions/s).
-const GPU_SERVER_BATCH: [(u32, u32); 4] = [(2, 128), (3, 96), (4, 64), (8, 32)];
+/// katago-rs on wgpu (Vulkan): not measured yet, so a spread around 4×64.
+const WGPU_SERVER_BATCH: [(u32, u32); 4] = [(4, 64), (8, 32), (6, 48), (2, 128)];
 
 /// A trial running below this fraction of the best so far is stopped half-way.
 const PRUNE_RATIO: f64 = 0.92;
@@ -50,13 +49,12 @@ pub struct Space {
 
 impl Space {
     /// The candidates for everything `pinned` leaves open, with `depth`
-    /// positions kept queued, on an OpenCL build or another backend.
+    /// positions kept queued, on `backend`.
     #[must_use]
-    pub fn new(pinned: &Overrides, depth: usize, opencl: bool) -> Self {
-        let pairs: &[(u32, u32)] = if opencl {
-            &OPENCL_SERVER_BATCH
-        } else {
-            &GPU_SERVER_BATCH
+    pub fn new(pinned: &Overrides, depth: usize, backend: EngineBackend) -> Self {
+        let pairs: &[(u32, u32)] = match backend {
+            EngineBackend::Rocm => &ROCM_SERVER_BATCH,
+            EngineBackend::Wgpu | EngineBackend::Flex => &WGPU_SERVER_BATCH,
         };
         let analysis = if pinned.get(ANALYSIS_THREADS).is_some() {
             vec![None]
@@ -267,9 +265,9 @@ mod tests {
         (cand.analysis_threads, cand.servers, cand.batch)
     }
 
-    /// The measured RX 6800 XT numbers for stock KataGo: 4×64 wins, 8×32 loses.
+    /// The prior wins: 4×64, and a clearly slower candidate is cut short.
     #[test]
-    fn stock_like_rates_pick_four_by_sixty_four() {
+    fn the_prior_wins_when_it_is_fastest() {
         let rates = HashMap::from([
             ((256, 4, 64), 75.0),
             ((256, 8, 32), 65.7),
@@ -278,7 +276,11 @@ mod tests {
             ((128, 4, 64), 68.0),
             ((512, 4, 64), 74.0),
         ]);
-        let report = search_with(&Space::new(&Overrides::default(), 1000, true), &rates, 1.0);
+        let report = search_with(
+            &Space::new(&Overrides::default(), 1000, EngineBackend::Wgpu),
+            &rates,
+            1.0,
+        );
         assert_eq!(best_of(&report), (Some(256), Some(4), Some(64)));
         // 2×128 was clearly slower than 4×64 and was cut short.
         assert!(report.history.iter().any(|(cand, outcome)| {
@@ -286,9 +288,9 @@ mod tests {
         }));
     }
 
-    /// The patched build (a command queue per server thread): 8×32 wins.
+    /// A clearly faster later candidate wins over the prior.
     #[test]
-    fn patched_like_rates_pick_eight_by_thirty_two() {
+    fn a_faster_candidate_beats_the_prior() {
         let rates = HashMap::from([
             ((256, 4, 64), 120.0),
             ((256, 8, 32), 165.0),
@@ -297,32 +299,40 @@ mod tests {
             ((128, 8, 32), 130.0),
             ((512, 8, 32), 160.0),
         ]);
-        let report = search_with(&Space::new(&Overrides::default(), 1000, true), &rates, 1.0);
+        let report = search_with(
+            &Space::new(&Overrides::default(), 1000, EngineBackend::Wgpu),
+            &rates,
+            1.0,
+        );
         assert_eq!(best_of(&report), (Some(256), Some(8), Some(32)));
     }
 
-    /// KataGo's ROCm backend on the RX 6800 XT (b10): fewer, bigger batches.
-    /// 3×96 is within the tie band of 2×128, so the prior (2×128) stands.
+    /// katago-rs on ROCm (RX 6800 XT, b18, f16): 8×64 first, and it wins;
+    /// 4×96 is within the tie band, so the prior stands.
     #[test]
-    fn rocm_like_rates_pick_two_by_one_twenty_eight() {
+    fn rocm_rates_pick_eight_by_sixty_four() {
         let rates = HashMap::from([
-            ((256, 2, 128), 193.0),
-            ((256, 3, 96), 196.7),
-            ((256, 4, 64), 181.0),
-            ((256, 8, 32), 161.0),
-            ((128, 2, 128), 170.0),
+            ((256, 8, 64), 13.4),
+            ((256, 4, 96), 13.0),
+            ((256, 4, 64), 12.3),
+            ((256, 8, 32), 12.0),
+            ((128, 8, 64), 11.0),
         ]);
-        let space = Space::new(&Overrides::default(), 460, false);
-        assert_eq!(space.server_batch.first(), Some(&(Some(2), Some(128))));
+        let space = Space::new(&Overrides::default(), 460, EngineBackend::Rocm);
+        assert_eq!(space.server_batch.first(), Some(&(Some(8), Some(64))));
         let report = search_with(&space, &rates, 1.0);
-        assert_eq!(best_of(&report), (Some(256), Some(2), Some(128)));
+        assert_eq!(best_of(&report), (Some(256), Some(8), Some(64)));
     }
 
     /// A near-tie is re-measured rather than decided by one noisy trial.
     #[test]
     fn near_ties_are_measured_twice() {
         let rates = HashMap::from([((256, 4, 64), 100.0), ((256, 8, 32), 98.0)]);
-        let report = search_with(&Space::new(&Overrides::default(), 1000, true), &rates, 10.0);
+        let report = search_with(
+            &Space::new(&Overrides::default(), 1000, EngineBackend::Wgpu),
+            &rates,
+            10.0,
+        );
         let count = |srv| {
             report
                 .history
@@ -339,17 +349,25 @@ mod tests {
     #[test]
     fn a_near_tie_goes_to_the_higher_prior_candidate() {
         let rates = HashMap::from([((256, 8, 32), 165.0), ((256, 6, 48), 166.0)]);
-        let report = search_with(&Space::new(&Overrides::default(), 1000, true), &rates, 10.0);
+        let report = search_with(
+            &Space::new(&Overrides::default(), 1000, EngineBackend::Wgpu),
+            &rates,
+            10.0,
+        );
         assert_eq!(best_of(&report), (Some(256), Some(8), Some(32)));
         // A clear win still counts.
         let rates = HashMap::from([((256, 8, 32), 160.0), ((256, 6, 48), 166.0)]);
-        let report = search_with(&Space::new(&Overrides::default(), 1000, true), &rates, 10.0);
+        let report = search_with(
+            &Space::new(&Overrides::default(), 1000, EngineBackend::Wgpu),
+            &rates,
+            10.0,
+        );
         assert_eq!(best_of(&report), (Some(256), Some(6), Some(48)));
     }
 
     #[test]
     fn failed_trials_are_skipped() {
-        let space = Space::new(&Overrides::default(), 1000, true);
+        let space = Space::new(&Overrides::default(), 1000, EngineBackend::Wgpu);
         let fake = |cand: Candidate, _prune: Option<f64>| async move {
             if cand.servers == Some(4) {
                 Outcome::Failed("out of memory".to_owned())
@@ -367,10 +385,10 @@ mod tests {
 
     #[test]
     fn pinned_keys_shrink_the_space() {
-        let full = Space::new(&Overrides::default(), 1000, true);
+        let full = Space::new(&Overrides::default(), 1000, EngineBackend::Wgpu);
         assert_eq!(full.analysis.len(), 3);
         // Two games in flight queue ~460 positions: 512 threads can't all work.
-        let shallow = Space::new(&Overrides::default(), 460, true);
+        let shallow = Space::new(&Overrides::default(), 460, EngineBackend::Wgpu);
         assert_eq!(shallow.analysis, vec![Some(256), Some(128)]);
         assert_eq!(full.server_batch.len(), 4);
         assert!(!full.is_fully_pinned());
@@ -378,7 +396,7 @@ mod tests {
         let srv = Space::new(
             &Overrides::parse("numNNServerThreadsPerModel=8"),
             1000,
-            true,
+            EngineBackend::Wgpu,
         );
         assert_eq!(
             srv.server_batch,
@@ -390,7 +408,11 @@ mod tests {
             ]
         );
 
-        let threads = Space::new(&Overrides::parse("numAnalysisThreads=64"), 1000, true);
+        let threads = Space::new(
+            &Overrides::parse("numAnalysisThreads=64"),
+            1000,
+            EngineBackend::Wgpu,
+        );
         assert_eq!(threads.analysis, vec![None]);
         let rates = HashMap::from([((0, 8, 32), 9.0)]);
         let report = search_with(&threads, &rates, 1.0);
@@ -408,7 +430,7 @@ mod tests {
                 "numAnalysisThreads=64,numNNServerThreadsPerModel=2,nnMaxBatchSize=16",
             ),
             1000,
-            true,
+            EngineBackend::Wgpu,
         );
         assert!(all.is_fully_pinned());
         let report = search_with(&all, &HashMap::new(), 1.0);

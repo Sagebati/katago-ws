@@ -20,7 +20,6 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
-      katago_version: ${{ steps.matrix.outputs.katago_version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -34,7 +33,6 @@ jobs:
         run: |
           json="$(just print-matrix)"
           echo "matrix=$(echo "$json" | jq -c '{include}')" >> "$GITHUB_OUTPUT"
-          echo "katago_version=$(echo "$json" | jq -r '.katago_version')" >> "$GITHUB_OUTPUT"
 
   build-binary:
     runs-on: ubuntu-24.04
@@ -89,7 +87,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.matrix.outputs.matrix) }}
     steps:
-      - name: Free runner disk (image bundles KataGo + a model + a release build)
+      - name: Free runner disk (image builds katago-rs and bundles its nets)
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
                       /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
@@ -100,6 +98,13 @@ jobs:
         with:
           path: katago-ws
           ref: ${{ inputs.ref }}
+
+      # The engine is built in the image (engine-build stage) from the pinned
+      # katago-rs; muxa/pgmq come along but aren't used by runtime-prebuilt.
+      - name: Checkout siblings (katago-rs)
+        uses: ./katago-ws/.github/actions/checkout-siblings
+        with:
+          katago-rs-ssh-key: ${{ secrets.KATAGO_RS_DEPLOY_KEY }}
 
       - uses: actions/download-artifact@v8
         with:
@@ -126,10 +131,10 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # context is the workspace root (not katago-ws/) — same convention as
-      # image.yml — because the Dockerfile's runtime-base stage does
-      # `COPY katago-ws/config.toml ...` relative to that root. The build-binary
-      # stage (which needs the sibling muxa/pgmq checkouts) is never evaluated
-      # for the runtime-prebuilt target, so those siblings aren't needed here.
+      # image.yml — because the Dockerfile's stages copy katago-ws/ and
+      # katago-rs/ relative to that root. The build-binary stage (which needs
+      # the sibling muxa/pgmq checkouts) is never evaluated for the
+      # runtime-prebuilt target.
       - name: Build + push ${{ matrix.variant }} image
         uses: docker/build-push-action@v7
         with:
@@ -141,10 +146,13 @@ jobs:
             prebuilt=prebuilt
           build-args: |
             RUNTIME_BASE=${{ matrix.base }}
-            KATAGO_VERSION=${{ needs.matrix.outputs.katago_version }}
-            KATAGO_ZIP=${{ matrix.zip }}
             RUNTIME_PKGS=${{ matrix.pkgs }}
-            RUSTICL_DRIVERS=${{ matrix.rusticl }}
+            RUNTIME_APT_GPG_URL=${{ matrix.key_url }}
+            RUNTIME_APT_REPO=${{ matrix.repo }}
+            ENGINE_FEATURES=${{ matrix.features }}
+            ENGINE_BACKEND=${{ matrix.backend }}
+            ENGINE_FP16=${{ matrix.fp16 }}
+            ENGINE_MODEL=${{ matrix.model }}
           tags: ghcr.io/sagebati/katago-ws:${{ matrix.variant }}-${{ inputs.ref || github.ref_name }}
           cache-from: type=gha,scope=release-${{ matrix.variant }}
           cache-to: type=gha,mode=max,scope=release-${{ matrix.variant }}

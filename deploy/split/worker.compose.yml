@@ -1,15 +1,21 @@
 # ── WORKER HOST ──────────────────────────────────────────────────────────────
-# Runs on EACH worker machine: KataGo engine + cluster WebSocket client. No
+# Runs on EACH worker machine: katago-rs engine + cluster WebSocket client. No
 # Postgres access. It dials the orchestrator and processes pushed jobs. Disposable
 # — if it dies mid-job the orchestrator's pgmq lease lapses and the job is redelivered.
 #
-#   KATAGO_WS_IMAGE=registry.example.com/katago-ws:latest \
+#   KATAGO_WS_IMAGE=ghcr.io/sagebati/katago-ws:rocm \
 #   ORCHESTRATOR_HOST=10.0.0.5 \
 #   CLUSTER_TOKEN=<same secret the orchestrator was given> \
 #   docker compose -f worker.compose.yml up -d --scale worker=4
 #
 # `--scale worker=N` runs N engines on this host; or just run this file on more
-# machines. Each worker advertises KATAGO_WS_WORKER__CONCURRENCY slots.
+# machines. Each worker advertises KATAGO_WS_WORKER__CONCURRENCY slots. One
+# engine saturates one GPU (an RX 6800 XT runs b18c384nbt at ~13 positions/s
+# at 100 visits), so N > 1 is for several GPUs or for the CPU image.
+#
+# Images: `:cpu` (flex, b10c128), `:vulkan` (wgpu, b18c384nbt, f16: AMD/Intel
+# through Mesa, NVIDIA through its own Vulkan driver), `:rocm` (HIP, b18c384nbt,
+# f16). The GPU images need the GPU passed in: see `devices` below.
 name: katago-ws-worker
 
 services:
@@ -29,26 +35,29 @@ services:
       KATAGO_WS_ENGINE__MAX_VISITS: "100"
       KATAGO_WS_ENGINE__REQUEST_TIMEOUT_SECS: "600"
       # GPU throughput is auto-tuned at startup: short trials pick
-      # numNNServerThreadsPerModel x nnMaxBatchSize, numAnalysisThreads and (on
-      # OpenCL) the device — ROCm over Mesa rusticl — and cache the result in
-      # /home/app/.katago (the volume below; without it every start re-tunes,
-      # plus KataGo's one-off OpenCL kernel tuning, cached there too). On an
-      # RX 6800 XT (b10, 100 visits) it picks 4x64 for stock KataGo and 8x32 for
-      # the patched build in patches/. Any of these set here is kept as given and
-      # only the rest are tuned; AUTOTUNE=false skips it, AUTOTUNE_MODE=fast
-      # trades exhaustiveness for a <30 s search.
+      # numNNServerThreadsPerModel x nnMaxBatchSize and numAnalysisThreads, and
+      # cache the result in /home/app/.katago (the volume below; without it every
+      # start re-tunes). On an RX 6800 XT (ROCm, b18c384nbt, 100 visits) it picks
+      # 8x64 with 256 analysis threads. Any of these set here is kept as given
+      # and only the rest are tuned; AUTOTUNE=false skips it, AUTOTUNE_MODE=fast
+      # trades exhaustiveness for a <30 s search. The cpu image skips it.
       # KATAGO_WS_ENGINE__AUTOTUNE: "false"
       # KATAGO_WS_ENGINE__AUTOTUNE_MODE: "fast"
       # KATAGO_WS_ENGINE__ANALYSIS_THREADS: "256"
       # KATAGO_WS_ENGINE__NN_SERVER_THREADS: "4"
       # KATAGO_WS_ENGINE__NN_MAX_BATCH_SIZE: "64"
-      # APPIMAGE_EXTRACT_AND_RUN=1 is baked into the image (the bundled KataGo is
-      # an AppImage and the slim runtime has no FUSE), so no need to set it here.
       RUST_LOG: info
     restart: unless-stopped
-    # KataGo's OpenCL kernel tuning + the auto-tune cache survive restarts.
-    # Replicas share it; with --scale N on ONE GPU, start one first so the rest
-    # hit the cache instead of tuning on the GPU at the same time.
+    # rocm: the HIP devices, and the host's video/render groups (numeric GIDs
+    # from `getent group video render`; they differ between distros).
+    # devices: ["/dev/kfd", "/dev/dri"]
+    # group_add: ["video", "render"]
+    # vulkan on AMD/Intel: devices: ["/dev/dri"] and the render group. On
+    # NVIDIA: the NVIDIA Container Toolkit, with
+    # deploy: { resources: { reservations: { devices: [{ driver: nvidia, count: all, capabilities: [gpu, graphics] }] } } }
+    # The auto-tune cache survives restarts. Replicas share it; with --scale N on
+    # ONE GPU, start one first so the rest hit the cache instead of tuning on the
+    # GPU at the same time.
     volumes:
       - katago-tuning:/home/app/.katago
     # No published ports — the worker dials OUT. It serves /healthz on 3000

@@ -24,7 +24,7 @@ const ROLE_ENV: &str = "KATAGO_WS_ROLE";
 #[command(
     name = "katago-ws",
     version,
-    about = "Queued SGF analysis on KataGo",
+    about = "Queued SGF analysis on katago-rs (KataGo's analysis engine in Rust)",
     after_help = "Flags override the config file and KATAGO_WS_* env vars. \
                   The role can also come from KATAGO_WS_ROLE (default: standalone)."
 )]
@@ -45,21 +45,21 @@ pub enum Role {
     },
     /// Web API + queue + cluster dispatcher; runs no engine.
     Orchestrator,
-    /// KataGo + a client dialing the orchestrator; no Postgres.
+    /// The engine + a client dialing the orchestrator; no Postgres.
     Worker {
         #[command(flatten)]
         engine: EngineArgs,
         #[command(flatten)]
         worker: WorkerArgs,
     },
-    /// KataGo only: a throughput benchmark over an SGF corpus, then exit.
+    /// The engine only: a throughput benchmark over an SGF corpus, then exit.
     Bench {
         #[command(flatten)]
         engine: EngineArgs,
     },
     /// Probe this instance's GET /healthz and exit 0 or 1 (Docker HEALTHCHECK).
     Healthcheck,
-    /// Auto-tune KataGo's throughput settings into the cache, then exit.
+    /// Auto-tune the engine's throughput settings into the cache, then exit.
     Autotune {
         /// The under-30 s search instead of `[engine] autotune_mode`.
         #[arg(long)]
@@ -82,7 +82,16 @@ pub struct EngineArgs {
     #[arg(long = "visits", value_name = "N")]
     #[serde(skip_serializing_if = "Option::is_none")]
     max_visits: Option<u32>,
-    /// Positions searched in parallel, KataGo's numAnalysisThreads
+    /// katago-rs compute backend: flex (CPU), wgpu (Vulkan) or rocm (AMD HIP)
+    /// ([engine] backend).
+    #[arg(long, value_name = "BACKEND", value_parser = ["flex", "wgpu", "rocm"])]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend: Option<String>,
+    /// Run the GPU network's 3x3 convolutions in f16 ([engine] fp16 = true).
+    #[arg(long)]
+    #[serde(skip_serializing_if = "is_false")]
+    fp16: bool,
+    /// Positions searched in parallel, numAnalysisThreads
     /// ([engine] analysis_threads). Default: one per CPU thread, or auto-tuned.
     #[arg(long = "threads", value_name = "N")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,11 +110,11 @@ pub struct EngineArgs {
     #[arg(long = "batch-size", value_name = "N")]
     #[serde(skip_serializing_if = "Option::is_none")]
     nn_max_batch_size: Option<u32>,
-    /// KataGo model file ([engine] model).
+    /// Network weights, a katago-rs .bpk ([engine] model).
     #[arg(long, value_name = "PATH")]
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
-    /// KataGo human SL network, for jobs with a human_profile
+    /// Human SL network weights (.bpk), for jobs with a human_profile
     /// ([engine] human_model).
     #[arg(long, value_name = "PATH")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -123,7 +132,7 @@ pub struct EngineArgs {
 /// `[worker] concurrency`, shared by every role that leases games.
 #[derive(Debug, Default, Args, Serialize)]
 pub struct SlotsArgs {
-    /// Games in flight at once, all fed to the one KataGo process
+    /// Games in flight at once, all fed to the one engine process
     /// ([worker] concurrency).
     #[arg(long = "slots", value_name = "N", help_heading = "Worker")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -281,6 +290,21 @@ mod tests {
         assert_eq!(engine.max_visits, 500);
         assert_eq!(worker.concurrency, 4);
         assert_eq!(worker.orchestrator_url, "wss://engine.example/cluster");
+    }
+
+    #[test]
+    fn backend_and_fp16_flags_set_the_engine_keys() {
+        let fig = layered(json!({}), &["worker", "--backend", "rocm", "--fp16"]);
+        let engine: EngineConfig = fig.extract_inner("engine").unwrap();
+        assert_eq!(engine.backend, crate::config::EngineBackend::Rocm);
+        assert!(engine.fp16);
+
+        let unset: EngineConfig = layered(json!({}), &["worker"])
+            .extract_inner("engine")
+            .unwrap();
+        assert_eq!(unset.backend, crate::config::EngineBackend::Flex);
+        assert!(!unset.fp16);
+        assert!(Cli::try_parse_from(["katago-ws", "worker", "--backend", "cuda"]).is_err());
     }
 
     #[test]

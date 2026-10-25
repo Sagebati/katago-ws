@@ -179,9 +179,14 @@ pub struct GameReport {
 /// losses, and neither is wrong.
 #[derive(Serialize)]
 pub struct EngineInfo {
-    /// Engine name — always `katago`.
+    /// Engine name — always `katago-rs`.
     pub name: &'static str,
-    /// Neural net the analysis ran against.
+    /// The KataGo analysis-engine version katago-rs follows (`1.16.5`), when
+    /// the binary reported one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Neural net the analysis ran against: its name (`g170e-b10c128`), as the
+    /// browser's katago-rs payload names it.
     pub model: String,
     /// Visits spent per analysed position.
     pub max_visits: u32,
@@ -196,7 +201,8 @@ pub struct EngineInfo {
     pub ownership_stdev: bool,
     /// Whether `policy` grids are present.
     pub policy: bool,
-    /// The human SL network behind `human_policy`, when there is one.
+    /// The human SL network behind `human_policy`, when there is one: its
+    /// name, as `model` (`b18c384nbt-humanv0`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub human_model: Option<String>,
     /// Visits of the screening pass, when two-pass analysis ran: positions
@@ -592,6 +598,18 @@ fn policy_at(policy: Option<&Vec<f32>>, mv: &str, board_size: u8) -> Option<f32>
         .map(|&prob| prob.max(0.0))
 }
 
+/// A network's name from its weights file: `/opt/katago-rs/nets/g170e-b10c128.bpk`
+/// is `g170e-b10c128` (also for a `.bin.gz`, `.txt.gz` or `.onnx`).
+#[must_use]
+pub fn net_name(model: &str) -> String {
+    let file = model.rsplit(['/', '\\']).next().unwrap_or(model);
+    [".bpk", ".bin.gz", ".txt.gz", ".onnx"]
+        .iter()
+        .find_map(|ext| file.strip_suffix(ext))
+        .unwrap_or(file)
+        .to_owned()
+}
+
 /// Assemble the analysis from the parsed game and KataGo's per-turn results.
 ///
 /// `human_profile` is the profile the query carried, if any; it's recorded
@@ -726,15 +744,16 @@ pub fn assemble(
         },
         payload_version: PAYLOAD_VERSION,
         engine: EngineInfo {
-            name: "katago",
-            model: cfg.model.clone(),
+            name: "katago-rs",
+            version: None,
+            model: net_name(&cfg.model),
             max_visits: cfg.max_visits,
             top_k: cfg.top_k,
             report_perspective: REPORT_PERSPECTIVE.as_katago_setting(),
             ownership: !ownership.is_empty(),
             ownership_stdev: !ownership_stdev.is_empty(),
             policy: !policy.is_empty(),
-            human_model: human_profile.as_ref().map(|_| cfg.human_model.clone()),
+            human_model: human_profile.as_ref().map(|_| net_name(&cfg.human_model)),
             screen_visits: cfg.two_pass().then_some(cfg.screen_visits),
         },
         ownership,
@@ -781,7 +800,7 @@ mod tests {
             top_k,
             max_visits: 100,
             model: "test-model".to_owned(),
-            human_model: "test-model-human".to_owned(),
+            human_model: "/opt/katago-rs/nets/test-model-human.bpk".to_owned(),
             ..EngineConfig::default()
         }
     }
@@ -1045,7 +1064,10 @@ mod tests {
         assert!(v2.moves[0].top_moves[0].pv.is_empty());
         assert!(v2.report.get("black").is_some());
         let engine = v2.engine.unwrap();
-        assert_eq!((engine.name.as_str(), engine.max_visits), ("katago", 100));
+        assert_eq!(
+            (engine.name.as_str(), engine.max_visits),
+            ("katago-rs", 100)
+        );
         assert!(engine.ownership);
     }
 
@@ -1208,8 +1230,9 @@ mod tests {
             &cfg(7),
             None,
         );
-        assert_eq!(analysis.engine.name, "katago");
+        assert_eq!(analysis.engine.name, "katago-rs");
         assert_eq!(analysis.engine.model, "test-model");
+        assert_eq!(analysis.engine.version, None);
         assert_eq!(analysis.engine.max_visits, 100);
         assert_eq!(analysis.engine.top_k, 7);
         assert_eq!(analysis.engine.report_perspective, "SIDETOMOVE");
@@ -1288,5 +1311,15 @@ mod tests {
         };
         let analysis = assemble(&tiny_game(), turns, &two_pass, None);
         assert_eq!(analysis.engine.screen_visits, Some(16));
+    }
+
+    #[test]
+    fn the_net_name_is_the_weights_file_stem() {
+        assert_eq!(
+            net_name("/opt/katago-rs/nets/g170e-b10c128.bpk"),
+            "g170e-b10c128"
+        );
+        assert_eq!(net_name("kata1-b18c384nbt.bin.gz"), "kata1-b18c384nbt");
+        assert_eq!(net_name("test-model"), "test-model");
     }
 }

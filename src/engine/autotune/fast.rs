@@ -1,5 +1,5 @@
 //! The fast search (`[engine] autotune_mode = "fast"`, `katago-ws autotune
-//! --fast`): a few trials, under ~30 s, guided by the hardware and the backend.
+//! --fast`): a few trials, guided by the hardware and the backend.
 //!
 //! The space is one-dimensional on purpose. Measured on an RX 6800 XT:
 //!
@@ -8,18 +8,20 @@
 //!   the GPU busy; beyond that, more changes nothing. It is derived, not
 //!   searched: from the GPU's SIMD lanes when known, capped by the queue depth
 //!   the worker's in-flight games provide.
-//! - **How that total splits into server threads** is the lever, and it
-//!   follows the KataGo build rather than the hardware: stock OpenCL shares one
-//!   in-order command queue across server threads (4×64 best, 8×32 slower), a
-//!   build with a queue per thread wants 8×32, the native ROCm backend 2×128.
-//!   So it is searched along a doubling ladder (1, 2, 4, 8, 16 server threads)
-//!   starting from the backend's usual winner, climbing while it improves.
+//! - **How that total splits into server threads** is the lever: katago-rs's
+//!   NN server threads are tasks on its one search thread, each with a batch
+//!   in flight, so the split decides how well the GPU stays fed (8 server
+//!   threads won on ROCm). It is searched along a doubling ladder (1, 2, 4,
+//!   8, 16 server threads) starting from the backend's usual winner, climbing
+//!   while it improves.
 //!
-//! Trials are expensive (a KataGo restart each, ~2 s on OpenCL, ~10 s on
-//! ROCm), so beyond the first two the search stops as soon as the next trial
-//! wouldn't fit the time budget, trusting the prior.
+//! Trials are expensive (an engine restart each), so beyond the first two the
+//! search stops as soon as the next trial wouldn't fit the time budget,
+//! trusting the prior.
 
 use std::future::Future;
+
+use crate::config::EngineBackend;
 
 use super::hw::Hardware;
 use super::overrides::{ANALYSIS_THREADS, BATCH_SIZE, Overrides, SERVER_THREADS};
@@ -31,10 +33,9 @@ const SERVER_LADDER: [u32; 5] = [1, 2, 4, 8, 16];
 /// Batches below this are too small to be worth a server thread.
 const MIN_BATCH: u32 = 8;
 
-/// Usual winners: OpenCL → 4 server threads (stock KataGo; a per-thread-queue
-/// build then climbs to 8), other GPU backends (ROCm/HIP, CUDA) → 2.
-const OPENCL_PRIOR: u32 = 4;
-const GPU_PRIOR: u32 = 2;
+/// Usual winners: ROCm → 8 server threads (measured), wgpu → 4 (not yet).
+const ROCM_PRIOR: u32 = 8;
+const WGPU_PRIOR: u32 = 4;
 
 /// A trial running below this fraction of the best so far is stopped half-way.
 const PRUNE_RATIO: f64 = 0.92;
@@ -75,9 +76,9 @@ pub struct Space {
 
 impl Space {
     /// The candidates for everything `pinned` leaves open, with `depth`
-    /// positions kept queued, on an OpenCL build or another backend.
+    /// positions kept queued, on `backend`.
     #[must_use]
-    pub fn new(pinned: &Overrides, depth: usize, opencl: bool, hw: Hardware) -> Self {
+    pub fn new(pinned: &Overrides, depth: usize, backend: EngineBackend, hw: Hardware) -> Self {
         let total = in_flight(hw.gpu_lanes, depth);
         let pinned_num = |key: &str| pinned.get(key).map(|val| val.parse::<u32>().ok());
         let analysis_threads = pinned.get(ANALYSIS_THREADS).is_none().then_some(total);
@@ -99,17 +100,19 @@ impl Space {
                         None,
                     )]
                 }
-                (None, None) => {
-                    let cpus = u32::try_from(hw.cpus).unwrap_or(u32::MAX).max(1);
-                    SERVER_LADDER
-                        .iter()
-                        .copied()
-                        .filter(|&srv| srv == 1 || (srv <= cpus && total / srv >= MIN_BATCH))
-                        .map(|srv| (Some(srv), Some(total / srv)))
-                        .collect()
-                }
+                // Not capped by the CPU count: katago-rs's server threads are
+                // tasks on one OS thread, not threads of their own.
+                (None, None) => SERVER_LADDER
+                    .iter()
+                    .copied()
+                    .filter(|&srv| srv == 1 || total / srv >= MIN_BATCH)
+                    .map(|srv| (Some(srv), Some(total / srv)))
+                    .collect(),
             };
-        let want = if opencl { OPENCL_PRIOR } else { GPU_PRIOR };
+        let want = match backend {
+            EngineBackend::Rocm => ROCM_PRIOR,
+            EngineBackend::Wgpu | EngineBackend::Flex => WGPU_PRIOR,
+        };
         // The prior, or the closest rung below it that survived the filters.
         let prior = ladder
             .iter()
@@ -282,11 +285,11 @@ mod tests {
         Overrides::default()
     }
 
-    /// Stock OpenCL KataGo (RX 6800 XT, b10 positions/s): 4×64 wins in two trials.
+    /// The prior (4 server threads on wgpu) wins in two trials.
     #[test]
-    fn stock_opencl_picks_four_by_sixty_four() {
+    fn the_prior_wins_in_two_trials() {
         let rates = HashMap::from([(1, 50.0), (2, 82.0), (4, 88.0), (8, 75.0), (16, 60.0)]);
-        let space = Space::new(&full(), 460, true, RX6800XT);
+        let space = Space::new(&full(), 460, EngineBackend::Wgpu, RX6800XT);
         let report = search_with(&space, &rates, 2);
         assert_eq!(picked(&report), (Some(4), Some(64)));
         assert_eq!(tried(&report), vec![4, 8]);
@@ -296,21 +299,11 @@ mod tests {
         assert_eq!(picked(&report), (Some(4), Some(64)));
     }
 
-    /// Per-thread-queue OpenCL build: climbs from 4 to 8, then stops at 16.
+    /// A better rung above the prior: climbs from 4 to 8, then stops at 16.
     #[test]
-    fn patched_opencl_climbs_to_eight_by_thirty_two() {
+    fn the_search_climbs_while_it_improves() {
         let rates = HashMap::from([(2, 101.0), (4, 145.0), (8, 155.0), (16, 140.0)]);
-        let space = Space::new(&full(), 460, true, RX6800XT);
-        // 12 CPUs: 16 server threads is off the ladder, so two trials decide.
-        let report = search_with(&space, &rates, 9);
-        assert_eq!(picked(&report), (Some(8), Some(32)));
-        assert_eq!(tried(&report), vec![4, 8]);
-        // With more cores the climb goes on to 16, which loses.
-        let big = Hardware {
-            cpus: 32,
-            ..RX6800XT
-        };
-        let space = Space::new(&full(), 460, true, big);
+        let space = Space::new(&full(), 460, EngineBackend::Wgpu, RX6800XT);
         let report = search_with(&space, &rates, 9);
         assert_eq!(tried(&report), vec![4, 8, 16]);
         assert_eq!(picked(&report), (Some(8), Some(32)));
@@ -320,38 +313,38 @@ mod tests {
         assert_eq!(picked(&report), (Some(8), Some(32)));
     }
 
-    /// Native ROCm backend: starts at 2×128, which wins.
+    /// katago-rs on ROCm: starts at 8 server threads, which wins.
     #[test]
-    fn rocm_picks_two_by_one_twenty_eight() {
-        let rates = HashMap::from([(1, 162.0), (2, 193.0), (4, 181.0), (8, 161.0)]);
-        let space = Space::new(&full(), 460, false, RX6800XT);
+    fn rocm_picks_eight_server_threads() {
+        let rates = HashMap::from([(2, 9.0), (4, 12.3), (8, 13.4), (16, 12.5)]);
+        let space = Space::new(&full(), 460, EngineBackend::Rocm, RX6800XT);
         let report = search_with(&space, &rates, 2);
-        assert_eq!(picked(&report), (Some(2), Some(128)));
-        assert_eq!(tried(&report), vec![2, 4]);
+        assert_eq!(picked(&report), (Some(8), Some(32)));
+        assert_eq!(tried(&report), vec![8, 16]);
     }
 
     /// A step within the tie band doesn't move the search off the prior.
     #[test]
     fn near_ties_keep_the_prior() {
-        let rates = HashMap::from([(2, 100.0), (4, 102.0), (1, 90.0)]);
-        let space = Space::new(&full(), 460, false, RX6800XT);
+        let rates = HashMap::from([(8, 100.0), (16, 102.0), (4, 90.0)]);
+        let space = Space::new(&full(), 460, EngineBackend::Rocm, RX6800XT);
         let report = search_with(&space, &rates, 9);
-        assert_eq!(picked(&report), (Some(2), Some(128)));
+        assert_eq!(picked(&report), (Some(8), Some(32)));
     }
 
     #[test]
     fn a_failing_prior_falls_back_down_the_ladder() {
-        let space = Space::new(&full(), 460, true, RX6800XT);
+        let space = Space::new(&full(), 460, EngineBackend::Wgpu, RX6800XT);
         let fake = |cand: Candidate, _prune: Option<f64>| async move {
             match cand.servers {
-                Some(4 | 8) => Outcome::Failed("out of memory".to_owned()),
+                Some(4 | 8 | 16) => Outcome::Failed("out of memory".to_owned()),
                 Some(srv) => Outcome::Measured(f64::from(srv)),
                 None => Outcome::Measured(0.0),
             }
         };
         let report =
             futures_util::FutureExt::now_or_never(run(&space, fake, || true)).expect("no waits");
-        // 4 and 8 fail; the walk restarts at the bottom and climbs to 2.
+        // 4, 8 and 16 fail; the walk restarts at the bottom and climbs to 2.
         assert_eq!(picked(&report), (Some(2), Some(128)));
         let none =
             |_cand: Candidate, _prune: Option<f64>| async { Outcome::Failed("no gpu".to_owned()) };
@@ -374,26 +367,28 @@ mod tests {
 
     #[test]
     fn the_ladder_respects_cores_batch_size_and_pins() {
-        let full_space = Space::new(&full(), 460, true, RX6800XT);
+        let full_space = Space::new(&full(), 460, EngineBackend::Wgpu, RX6800XT);
         assert_eq!(full_space.total(), 256);
-        // 16 server threads would exceed the 12 CPUs.
-        assert_eq!(full_space.ladder.len(), 4);
+        // Every rung: server threads are not capped by the CPU count.
+        assert_eq!(full_space.ladder.len(), 5);
         assert_eq!(full_space.ladder[full_space.prior], (Some(4), Some(64)));
         assert_eq!(full_space.analysis_threads, Some(256));
 
-        // A 4-core box doesn't try 8 or 16 server threads.
+        // A small GPU: 128 in flight, and no batch below 8.
         let small = Hardware {
             cpus: 4,
             gpu_lanes: Some(768),
         };
-        let space = Space::new(&full(), 460, true, small);
+        let space = Space::new(&full(), 460, EngineBackend::Wgpu, small);
         assert_eq!(space.total(), 128);
         assert_eq!(
             space.ladder,
             vec![
                 (Some(1), Some(128)),
                 (Some(2), Some(64)),
-                (Some(4), Some(32))
+                (Some(4), Some(32)),
+                (Some(8), Some(16)),
+                (Some(16), Some(8))
             ]
         );
 
@@ -401,7 +396,7 @@ mod tests {
         let srv = Space::new(
             &Overrides::parse("numNNServerThreadsPerModel=8"),
             460,
-            true,
+            EngineBackend::Wgpu,
             RX6800XT,
         );
         assert_eq!(srv.ladder, vec![(None, Some(32))]);
@@ -413,7 +408,7 @@ mod tests {
         let threads = Space::new(
             &Overrides::parse("numAnalysisThreads=64"),
             460,
-            true,
+            EngineBackend::Wgpu,
             RX6800XT,
         );
         assert_eq!(threads.analysis_threads, None);

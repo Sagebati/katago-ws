@@ -6,13 +6,15 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
 fn default_binary() -> String {
-    "katago".to_owned()
+    "katago-rs".to_owned()
 }
 fn default_config() -> String {
     "analysis.cfg".to_owned()
 }
+/// katago-rs loads a network compiled into it from its `.bpk` weights, matched on
+/// the file name (`g170e-b10c128.bpk` is that net).
 fn default_model() -> String {
-    "model.bin.gz".to_owned()
+    "g170e-b10c128.bpk".to_owned()
 }
 fn default_max_visits() -> u32 {
     100
@@ -38,7 +40,7 @@ fn default_board_size() -> u8 {
 fn default_timeout() -> u64 {
     600
 }
-/// Positions KataGo searches in parallel: by default, one per hardware thread
+/// Positions the engine searches in parallel: by default, one per hardware thread
 /// this process may use (cgroup CPU limits included). A game is submitted as one
 /// query covering every turn, so there are always hundreds of positions
 /// waiting: the throughput preset (many positions × one thread each) keeps the
@@ -62,6 +64,37 @@ fn default_autotune_timeout() -> u64 {
     300
 }
 
+/// katago-rs's compute backend (`-backend`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EngineBackend {
+    /// The CPU (burn flex).
+    #[default]
+    Flex,
+    /// Any GPU with a Vulkan (or Metal) driver, through wgpu.
+    Wgpu,
+    /// AMD GPUs through ROCm (HIP).
+    Rocm,
+}
+
+impl EngineBackend {
+    /// The value of katago-rs's `-backend`.
+    #[must_use]
+    pub fn as_arg(self) -> &'static str {
+        match self {
+            Self::Flex => "flex",
+            Self::Wgpu => "wgpu",
+            Self::Rocm => "rocm",
+        }
+    }
+
+    /// Whether the backend runs on a GPU.
+    #[must_use]
+    pub fn is_gpu(self) -> bool {
+        self != Self::Flex
+    }
+}
+
 /// How hard `[engine] autotune` searches.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -73,15 +106,24 @@ pub enum AutotuneMode {
     Fast,
 }
 
-/// `[engine]` — how to launch and drive the KataGo analysis engine.
+/// `[engine]` — how to launch and drive the analysis engine: katago-rs, speaking
+/// KataGo's analysis protocol.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct EngineConfig {
-    /// Path to (or name of) the `katago` binary.
+    /// Path to (or name of) the `katago-rs` binary.
     pub binary: String,
-    /// KataGo analysis config file (`-config`).
+    /// katago-rs's compute backend (`-backend`): `flex` (CPU), `wgpu`
+    /// (Vulkan) or `rocm` (AMD HIP). The binary must have it compiled in.
+    pub backend: EngineBackend,
+    /// Run the GPU network's 3x3 convolutions in f16 (`burnUseFP16 = true`):
+    /// about +20% throughput, within upstream KataGo's own FP16 error. GPU
+    /// backends only (katago-rs rejects it on the CPU).
+    pub fp16: bool,
+    /// Analysis config file (`-config`), KataGo's format.
     pub config: String,
-    /// KataGo model/weights file (`-model`).
+    /// Network weights (`-model`): a `.bpk` named after one of the networks
+    /// compiled into katago-rs (`g170e-b10c128.bpk`, `kata1-b18c384nbt.bpk`).
     pub model: String,
     /// Max visits per analyzed position.
     pub max_visits: u32,
@@ -97,7 +139,7 @@ pub struct EngineConfig {
     /// prior over every move before any search, and — with a human model and a
     /// job's `human_profile` — the human policy. No extra search, only payload.
     pub include_policy: bool,
-    /// KataGo human SL network (`-human-model`, e.g. `b18c384nbt-humanv0.bin.gz`).
+    /// Human SL network (`-human-model`, e.g. `b18c384nbt-humanv0.bpk`).
     /// Empty (the default) loads none: jobs asking for a `human_profile` get
     /// no human policy. Loaded beside the main model — roughly another 100 MB
     /// of VRAM — and evaluated once per analysed position, not per visit.
@@ -111,7 +153,7 @@ pub struct EngineConfig {
     /// Per-game analysis timeout (seconds).
     pub request_timeout_secs: u64,
 
-    // KataGo search/batching tuning, passed as `-override-config` so it is set
+    // Search/batching tuning, passed as `-override-config` so it is set
     // per deploy (env vars) without editing or rebuilding the shipped
     // `analysis.cfg`. For each numeric knob, `0` keeps the config file's value.
     /// `numAnalysisThreads`: positions searched in parallel.
@@ -140,26 +182,24 @@ pub struct EngineConfig {
     /// at least this. Default: the inaccuracy threshold.
     pub refine_score_delta: f32,
 
-    /// Auto-tune KataGo's throughput settings (`analysis_threads`,
-    /// `nn_server_threads` × `nn_max_batch_size`, the OpenCL device) before
-    /// launching it, caching the result (see `engine::autotune`). Settings
+    /// Auto-tune the engine's throughput settings (`analysis_threads`,
+    /// `nn_server_threads` × `nn_max_batch_size`) before launching it,
+    /// caching the result (see `engine::autotune`). Settings
     /// given explicitly (config file or env, including keys in
     /// `override_config`) are kept and only the rest are tuned.
     /// `KATAGO_WS_ENGINE__AUTOTUNE=false` turns it off completely.
     pub autotune: bool,
-    /// `thorough` (default: every candidate, near-ties re-measured; ~1–1.5 min
-    /// on a GPU) or `fast` (a hardware-sized ladder walk from the backend's
-    /// usual winner, under ~30 s). `katago-ws autotune --fast` runs the latter
-    /// once and exits.
+    /// `thorough` (default: every candidate, near-ties re-measured; a few
+    /// minutes on a GPU) or `fast` (from the backend's usual winner, a few
+    /// trials). `katago-ws autotune --fast` runs the latter once and exits.
     pub autotune_mode: AutotuneMode,
     /// Where the auto-tune result is cached. Empty =
-    /// `~/.katago/katago-ws-autotune.json`, beside KataGo's own OpenCL kernel
-    /// tuning (`~/.katago/opencltuning`): persist `~/.katago` in a container
-    /// volume to keep both across restarts.
+    /// `~/.katago/katago-ws-autotune.json`: persist `~/.katago` in a container
+    /// volume to keep it across restarts.
     pub autotune_cache: String,
     /// Give up tuning (and launch with the config as given) after this many
-    /// seconds. Generous because a first run on a new GPU/model also includes
-    /// KataGo's one-off OpenCL kernel tuning.
+    /// seconds. Generous because a first run on a new GPU also compiles every
+    /// GPU kernel once.
     pub autotune_timeout_secs: u64,
 }
 
@@ -170,8 +210,8 @@ impl EngineConfig {
         self.screen_visits > 0 && self.screen_visits < self.max_visits
     }
 
-    /// The `-override-config` argument for KataGo, or `None` when nothing is
-    /// overridden.
+    /// The `-override-config` argument for the engine, or `None` when nothing
+    /// is overridden.
     #[must_use]
     pub fn katago_overrides(&self) -> Option<String> {
         let numeric = [
@@ -187,13 +227,14 @@ impl EngineConfig {
             .into_iter()
             .filter(|&(_, value)| value > 0)
             .map(|(key, value)| format!("{key}={value}"));
+        let fp16 = self.fp16.then(|| "burnUseFP16=true".to_owned());
         let extra = self
             .override_config
             .split(',')
             .map(str::trim)
             .filter(|pair| !pair.is_empty())
             .map(str::to_owned);
-        let joined = pairs.chain(extra).collect::<Vec<_>>().join(",");
+        let joined = pairs.chain(fp16).chain(extra).collect::<Vec<_>>().join(",");
         (!joined.is_empty()).then_some(joined)
     }
 }
@@ -202,13 +243,15 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             binary: default_binary(),
+            backend: EngineBackend::default(),
+            fp16: false,
             config: default_config(),
             model: default_model(),
             max_visits: default_max_visits(),
             analysis_pv_len: default_pv_len(),
             // On by default: ownership is what lets a consumer say *which*
             // stones a mistake cost, rather than only how many points. It
-            // roughly doubles KataGo's memory use and costs a little speed —
+            // roughly doubles the engine's memory use and costs a little speed —
             // turn it off on a memory-constrained worker.
             include_ownership: true,
             include_ownership_stdev: true,
@@ -235,7 +278,7 @@ impl Default for EngineConfig {
 }
 
 /// Games in flight per engine. Each one is hundreds of positions, so a few
-/// suffice to keep KataGo's queue from draining while one game's last turns
+/// suffice to keep the engine's queue from draining while one game's last turns
 /// finish (and, with two-pass analysis, while a game waits on its refinement).
 fn default_concurrency() -> usize {
     4
@@ -384,6 +427,35 @@ mod tests {
             ..EngineConfig::default()
         };
         assert_eq!(none.katago_overrides(), None);
+    }
+
+    #[test]
+    fn fp16_is_passed_as_the_burn_override_before_the_raw_ones() {
+        let cfg = EngineConfig {
+            analysis_threads: 0,
+            search_threads_per_analysis: 0,
+            fp16: true,
+            override_config: "logToStderr=false".to_owned(),
+            ..EngineConfig::default()
+        };
+        assert_eq!(
+            cfg.katago_overrides().as_deref(),
+            Some("burnUseFP16=true,logToStderr=false")
+        );
+    }
+
+    #[test]
+    fn backend_names_are_katago_rs_flags() {
+        for (backend, arg) in [
+            (EngineBackend::Flex, "flex"),
+            (EngineBackend::Wgpu, "wgpu"),
+            (EngineBackend::Rocm, "rocm"),
+        ] {
+            assert_eq!(backend.as_arg(), arg);
+            let parsed: EngineBackend = serde_json::from_value(serde_json::json!(arg)).unwrap();
+            assert_eq!(parsed, backend);
+        }
+        assert!(!EngineBackend::Flex.is_gpu() && EngineBackend::Rocm.is_gpu());
     }
 
     #[test]

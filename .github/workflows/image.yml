@@ -1,21 +1,22 @@
 # Build the katago-ws images and push them to GitHub Container Registry (ghcr.io),
 # so a host can pull a ready image instead of building the Dockerfile itself —
-# which it can't, because the build needs the sibling `muxa` + `pgmq` crates as a
-# PARENT context (a one-repo clone doesn't have them).
+# which it can't, because the build needs the sibling `katago-rs` (the engine),
+# `muxa` + `pgmq` repos as a PARENT context (a one-repo clone doesn't have them).
 #
-# One Dockerfile, three KataGo binaries — built as a matrix, one image per
-# backend, derived from `just print-matrix` (the justfile is the single source
-# of truth for the variant trios; see also .github/workflows/release.yml, which
-# reuses the same matrix for tag-triggered versioned releases):
+# One Dockerfile, three katago-rs builds — a matrix, one image per backend,
+# derived from `just print-matrix` (the justfile is the single source of truth
+# for the variants; see also .github/workflows/release.yml, which reuses the
+# same matrix for tag-triggered versioned releases):
 #
-#   :cpu     Eigen     — pure CPU, no GPU            (also tagged :latest)
-#   :cuda    CUDA      — NVIDIA GPU (needs --gpus)
-#   :opencl  OpenCL    — AMD/Intel GPU (--device /dev/dri)
+#   :cpu     burn flex  — pure CPU, no GPU, b10c128       (also tagged :latest)
+#   :vulkan  wgpu       — any GPU with a Vulkan driver, b18c384nbt
+#   :rocm    HIP        — AMD GPUs (--device /dev/kfd --device /dev/dri), b18c384nbt
 #
 # Each is also tagged :<variant>-<commit-sha>. The CPU image is :latest because
 # it runs anywhere (no GPU runtime required). This workflow only handles the
 # rolling main-push path; versioned (:variant-vX.Y.Z) images + the binary
-# release come from release.yml on a `v*.*.*` tag push.
+# release come from release.yml on a `v*.*.*` tag push. A manual run on another
+# branch pushes only :<variant>-<commit-sha>, never the rolling tags.
 name: image
 
 on:
@@ -28,7 +29,6 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
-      katago_version: ${{ steps.matrix.outputs.katago_version }}
     steps:
       - name: Checkout katago-ws
         uses: actions/checkout@v7
@@ -43,7 +43,6 @@ jobs:
         run: |
           json="$(just print-matrix)"
           echo "matrix=$(echo "$json" | jq -c '{include}')" >> "$GITHUB_OUTPUT"
-          echo "katago_version=$(echo "$json" | jq -r '.katago_version')" >> "$GITHUB_OUTPUT"
 
   build-push:
     needs: matrix
@@ -56,7 +55,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.matrix.outputs.matrix) }}
     steps:
-      - name: Free runner disk (image bundles KataGo + a model + a release build)
+      - name: Free runner disk (image builds katago-rs and two release binaries)
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
                       /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
@@ -67,8 +66,10 @@ jobs:
         with:
           path: katago-ws
 
-      - name: Checkout siblings (muxa, pgmq)
+      - name: Checkout siblings (katago-rs, muxa, pgmq)
         uses: ./katago-ws/.github/actions/checkout-siblings
+        with:
+          katago-rs-ssh-key: ${{ secrets.KATAGO_RS_DEPLOY_KEY }}
 
       - name: Scope the Docker build context
         run: |
@@ -89,15 +90,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compose image tags (always :<variant> + :<variant>-<sha>; cpu also :latest)
+      # The rolling tags only from main: Coolify's orchestrator pulls :latest.
+      - name: Compose image tags (:<variant>-<sha>; from main also :<variant>, cpu :latest)
         id: tags
         run: |
           {
             echo "tags<<EOF"
-            echo "ghcr.io/sagebati/katago-ws:${{ matrix.variant }}"
             echo "ghcr.io/sagebati/katago-ws:${{ matrix.variant }}-${{ github.sha }}"
-            if [ "${{ matrix.variant }}" = "cpu" ]; then
-              echo "ghcr.io/sagebati/katago-ws:latest"
+            if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+              echo "ghcr.io/sagebati/katago-ws:${{ matrix.variant }}"
+              if [ "${{ matrix.variant }}" = "cpu" ]; then
+                echo "ghcr.io/sagebati/katago-ws:latest"
+              fi
             fi
             echo EOF
           } >> "$GITHUB_OUTPUT"
@@ -111,10 +115,13 @@ jobs:
           push: true
           build-args: |
             RUNTIME_BASE=${{ matrix.base }}
-            KATAGO_VERSION=${{ needs.matrix.outputs.katago_version }}
-            KATAGO_ZIP=${{ matrix.zip }}
             RUNTIME_PKGS=${{ matrix.pkgs }}
-            RUSTICL_DRIVERS=${{ matrix.rusticl }}
+            RUNTIME_APT_GPG_URL=${{ matrix.key_url }}
+            RUNTIME_APT_REPO=${{ matrix.repo }}
+            ENGINE_FEATURES=${{ matrix.features }}
+            ENGINE_BACKEND=${{ matrix.backend }}
+            ENGINE_FP16=${{ matrix.fp16 }}
+            ENGINE_MODEL=${{ matrix.model }}
           tags: ${{ steps.tags.outputs.tags }}
           # Per-variant scope: the heavy (and identical) Rust builder stage is
           # reused run-over-run without the three concurrent jobs racing on one

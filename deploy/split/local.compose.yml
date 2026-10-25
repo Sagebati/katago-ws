@@ -43,6 +43,5 @@ services:
       KATAGO_WS_WORKER__CONCURRENCY: "1"
       KATAGO_WS_ENGINE__MAX_VISITS: "8"
       RUST_LOG: info
-      # (APPIMAGE_EXTRACT_AND_RUN is baked into the image — no need to set it.)
     depends_on:
       - orchestrator

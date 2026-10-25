@@ -1,32 +1,32 @@
 //! The auto-tune cache: one JSON file of tuned results, each keyed by
-//! everything that changes the answer — the GPU(s) and OpenCL runtimes
-//! visible, the KataGo binary, model and config file, `max_visits`, board
-//! size, games in flight, and the pinned `override_config` keys. A matching
-//! entry skips tuning entirely. Delete the file (or the entry) to retune.
+//! everything that changes the answer — the GPU(s) visible, the engine binary,
+//! backend, precision, model and config file, `max_visits`, board size, games
+//! in flight, and the pinned `override_config` keys. A matching entry skips
+//! tuning entirely. Delete the file (or the entry) to retune.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{AutotuneMode, EngineConfig};
+use crate::config::{AutotuneMode, EngineBackend, EngineConfig};
 
 use super::overrides::Overrides;
 use super::search::Outcome;
 
 /// Bump when the tuning procedure changes enough to invalidate old results.
-const TUNER_VERSION: u32 = 3;
+/// 4: katago-rs (backend and precision in the key, no OpenCL device probe).
+const TUNER_VERSION: u32 = 4;
 
-/// Environment variables that change which devices/runtimes KataGo sees.
-const DEVICE_ENV: [&str; 8] = [
+/// Environment variables that change which devices/runtimes the engine sees.
+const DEVICE_ENV: [&str; 7] = [
     "CUDA_VISIBLE_DEVICES",
     "HIP_VISIBLE_DEVICES",
     "ROCR_VISIBLE_DEVICES",
     "GPU_DEVICE_ORDINAL",
-    "RUSTICL_ENABLE",
-    "OCL_ICD_VENDORS",
-    "OCL_ICD_FILENAMES",
-    "OPENCL_VENDOR_PATH",
+    "WGPU_ADAPTER_NAME",
+    "WGPU_BACKEND",
+    "VK_ICD_FILENAMES",
 ];
 
 /// Identity of a file: where it resolves to, its size and mtime.
@@ -61,9 +61,13 @@ pub struct CacheKey {
     pub tuner: u32,
     /// `thorough` or `fast`.
     pub mode: String,
-    /// GPUs (PCI ids), OpenCL ICDs and device-selection env vars.
+    /// GPUs (PCI ids) and device-selection env vars.
     pub gpu: Vec<String>,
     pub binary: FileStamp,
+    /// katago-rs `-backend`.
+    pub backend: EngineBackend,
+    /// Whether the GPU convs run in f16.
+    pub fp16: bool,
     pub model: FileStamp,
     pub config: FileStamp,
     pub max_visits: u32,
@@ -83,6 +87,8 @@ impl CacheKey {
             mode: mode_name(cfg.autotune_mode).to_owned(),
             gpu: gpu_identity(),
             binary: FileStamp::of(&resolve_binary(&cfg.binary)),
+            backend: cfg.backend,
+            fp16: cfg.fp16,
             model: FileStamp::of(Path::new(&cfg.model)),
             config: FileStamp::of(Path::new(&cfg.config)),
             max_visits: cfg.max_visits,
@@ -139,8 +145,8 @@ struct CacheFile {
 }
 
 /// `[engine] autotune_cache`, or the default when empty:
-/// `~/.katago/katago-ws-autotune.json` — next to KataGo's own OpenCL kernel
-/// tuning (`~/.katago/opencltuning`), so one volume persists both — else
+/// `~/.katago/katago-ws-autotune.json` — the directory a worker's volume
+/// persists — else
 /// `/var/cache/katago-ws/autotune.json` when there is no `$HOME`.
 #[must_use]
 pub fn resolve_path(configured: &str) -> PathBuf {
@@ -214,7 +220,7 @@ fn read(path: &Path) -> CacheFile {
         .unwrap_or_default()
 }
 
-/// `binary` as KataGo will be launched: a bare name is looked up on `PATH`.
+/// `binary` as the engine will be launched: a bare name is looked up on `PATH`.
 fn resolve_binary(binary: &str) -> PathBuf {
     let path = Path::new(binary);
     if binary.contains('/') {
@@ -229,9 +235,8 @@ fn resolve_binary(binary: &str) -> PathBuf {
         .unwrap_or_else(|| path.to_path_buf())
 }
 
-/// The visible GPUs and OpenCL runtimes, as stable strings: DRM cards' PCI
-/// vendor/device/revision, the NVIDIA driver version, installed OpenCL ICDs,
-/// and device-selection environment variables.
+/// The visible GPUs, as stable strings: DRM cards' PCI vendor/device/revision,
+/// the NVIDIA driver version, and device-selection environment variables.
 fn gpu_identity() -> Vec<String> {
     let mut ids = Vec::new();
     if let Ok(cards) = std::fs::read_dir("/sys/class/drm") {
@@ -261,11 +266,6 @@ fn gpu_identity() -> Vec<String> {
     {
         ids.push(format!("nvidia {}", first.trim()));
     }
-    if let Ok(icds) = std::fs::read_dir("/etc/OpenCL/vendors") {
-        for icd in icds.flatten() {
-            ids.push(format!("icd {}", icd.file_name().to_string_lossy()));
-        }
-    }
     for var in DEVICE_ENV {
         if let Some(val) = std::env::var_os(var) {
             ids.push(format!("env {var}={}", val.to_string_lossy()));
@@ -285,17 +285,19 @@ mod tests {
             mode: "thorough".to_owned(),
             gpu: vec!["pci 0x1002:0x73bf rev 0xc1".to_owned()],
             binary: FileStamp {
-                path: "/opt/katago/katago".to_owned(),
+                path: "/opt/katago-rs/katago-rs".to_owned(),
                 size: 7,
                 mtime_ns: 1,
             },
+            backend: EngineBackend::Rocm,
+            fp16: true,
             model: FileStamp {
-                path: "/opt/katago/model.bin.gz".to_owned(),
+                path: "/opt/katago-rs/nets/g170e-b10c128.bpk".to_owned(),
                 size: model_size,
                 mtime_ns: 1,
             },
             config: FileStamp {
-                path: "/opt/katago/analysis.cfg".to_owned(),
+                path: "/opt/katago-rs/analysis.cfg".to_owned(),
                 size: 3,
                 mtime_ns: 1,
             },
@@ -368,10 +370,14 @@ mod tests {
         let mut pinned = base.clone();
         pinned.pinned = "numAnalysisThreads=64".to_owned();
         let mut gpu = base.clone();
-        gpu.gpu.push("icd rusticl.icd".to_owned());
+        gpu.gpu.push("env HIP_VISIBLE_DEVICES=1".to_owned());
+        let mut fp16 = base.clone();
+        fp16.fp16 = !base.fp16;
+        let mut backend = base.clone();
+        backend.backend = EngineBackend::Wgpu;
         let mut binary = base.clone();
         binary.binary.mtime_ns = 2;
-        for other in [visits, pinned, gpu, binary] {
+        for other in [visits, pinned, gpu, binary, fp16, backend] {
             assert_ne!(base, other);
         }
     }

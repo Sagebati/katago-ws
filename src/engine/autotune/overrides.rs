@@ -1,4 +1,4 @@
-//! KataGo `-override-config` strings: `key=value,key=value`, ordered.
+//! `-override-config` strings (KataGo's config syntax): `key=value,key=value`, ordered.
 
 use std::fmt;
 
@@ -10,10 +10,6 @@ pub const SEARCH_THREADS: &str = "numSearchThreadsPerAnalysisThread";
 pub const SERVER_THREADS: &str = "numNNServerThreadsPerModel";
 /// `nnMaxBatchSize` — positions per NN batch.
 pub const BATCH_SIZE: &str = "nnMaxBatchSize";
-
-/// Prefixes of the keys that select an OpenCL device (`openclDeviceToUse`,
-/// `openclDeviceToUseThreadN`, and the older `openclGpuToUse*` spellings).
-const DEVICE_KEY_PREFIXES: [&str; 2] = ["openclDeviceToUse", "openclGpuToUse"];
 
 /// An ordered set of `key=value` settings. Keys are unique; setting an
 /// existing key replaces its value in place.
@@ -81,14 +77,6 @@ impl Overrides {
     pub fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) {
         self.0.retain(|(key, _)| keep(key));
     }
-
-    /// Whether any key selects the OpenCL device.
-    #[must_use]
-    pub fn pins_opencl_device(&self) -> bool {
-        self.0
-            .iter()
-            .any(|(key, _)| DEVICE_KEY_PREFIXES.iter().any(|pre| key.starts_with(pre)))
-    }
 }
 
 impl fmt::Display for Overrides {
@@ -132,13 +120,5 @@ mod tests {
             pinned.to_string(),
             "numNNServerThreadsPerModel=4,logDir=/tmp/x,nnMaxBatchSize=32"
         );
-    }
-
-    #[test]
-    fn device_pins_are_recognised() {
-        assert!(Overrides::parse("openclDeviceToUse=1").pins_opencl_device());
-        assert!(Overrides::parse("openclDeviceToUseThread3=0").pins_opencl_device());
-        assert!(Overrides::parse("openclGpuToUse=0").pins_opencl_device());
-        assert!(!Overrides::parse("openclUseFP16=true").pins_opencl_device());
     }
 }

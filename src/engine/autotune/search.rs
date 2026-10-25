@@ -46,17 +46,6 @@ pub struct Report {
     pub history: Vec<(Candidate, Outcome)>,
 }
 
-/// The backend named by `katago version` (`Using OpenCL backend` → `OpenCL`).
-#[must_use]
-pub fn parse_backend(version_output: &str) -> Option<&str> {
-    version_output.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("Using ")?
-            .strip_suffix(" backend")
-            .map(str::trim)
-    })
-}
-
 /// Positions/s over a trial's measured window, from the running count of
 /// analyzed positions.
 #[derive(Debug, Clone, Copy)]
@@ -103,19 +92,6 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-
-    #[test]
-    fn backend_is_read_from_katago_version() {
-        let out = "KataGo v1.16.5\nGit revision: ba93867\nCompile Time: May 25 2026\n\
-                   Using OpenCL backend\nCompiled to support contributing\n";
-        assert_eq!(parse_backend(out), Some("OpenCL"));
-        assert_eq!(
-            parse_backend("Using Eigen(CPU) backend"),
-            Some("Eigen(CPU)")
-        );
-        assert_eq!(parse_backend("Using ROCm backend\n"), Some("ROCm"));
-        assert_eq!(parse_backend("garbage"), None);
-    }
 
     #[test]
     fn meter_measures_the_window_only() {

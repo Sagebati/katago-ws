@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# One benchmark run of the KataGo worker: derive a KataGo config from a base
-# file plus KEY=VALUE overrides, then run `katago-ws bench` against it.
+# One benchmark run of the katago-rs worker: derive an analysis config from a
+# base file plus KEY=VALUE overrides, then run `katago-ws bench` against it.
 #
 #   scripts/bench.sh LABEL [cfg.key=value ...] [env.KATAGO_WS_X=value ...]
 #
 #   scripts/bench.sh threads32x1 numAnalysisThreads=32 numSearchThreadsPerAnalysisThread=1
 #   scripts/bench.sh conc4 env.KATAGO_WS_BENCH__CONCURRENCY=4
 #
-# Bare KEY=VALUE pairs override lines of the KataGo config (uncommenting them if
+# Bare KEY=VALUE pairs override lines of the analysis config (uncommenting them if
 # needed); `env.` pairs are exported for the run (KATAGO_WS_ENGINE__*, KATAGO_WS_BENCH__*).
 # Report → bench/results/LABEL.json, derived config → bench/cfg/LABEL.cfg.
 #
@@ -20,8 +20,11 @@
 #   prod      bench/sgf-large, ~300 games (~45 min). Sustained, final numbers.
 #
 # Defaults (override in the environment): BENCH_PRESET, BENCH_BASE_CFG,
-# BENCH_MODEL, BENCH_KATAGO, BENCH_CORPUS (wins over the preset),
-# BENCH_CONCURRENCY, BENCH_MAX_VISITS. Requires a release build.
+# BENCH_KATAGO (bench/katago-rs), BENCH_BACKEND (rocm when ROCm's HIP runtime is
+# installed, else wgpu; or flex), BENCH_FP16 (true on a GPU backend), BENCH_MODEL
+# (b18c384nbt on a GPU, b10c128 on flex: the images' defaults), BENCH_CORPUS
+# (wins over the preset), BENCH_CONCURRENCY, BENCH_MAX_VISITS. Requires a
+# release build and scripts/bench_setup.sh.
 #
 # The startup auto-tune ([engine] autotune) is OFF here by default, so a run
 # measures exactly the config it derives; BENCH_AUTOTUNE=true benchmarks the
@@ -30,7 +33,7 @@
 #
 # The derived config file is authoritative: the run zeroes [engine]'s own
 # thread/batch knobs (analysis_threads etc.), which would otherwise be passed
-# to KataGo as -override-config and win over the file.
+# to katago-rs as -override-config and win over the file.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -66,10 +69,22 @@ for kv in "$@"; do
   fi
 done
 
+if [[ -z ${BENCH_BACKEND:-} ]]; then
+  BENCH_BACKEND=wgpu
+  [[ -e ${ROCM_PATH:-/opt/rocm}/lib/libamdhip64.so ]] && BENCH_BACKEND=rocm
+fi
+if [[ $BENCH_BACKEND == flex ]]; then
+  fp16=${BENCH_FP16:-false} model=${BENCH_MODEL:-bench/models/g170e-b10c128.bpk}
+else
+  fp16=${BENCH_FP16:-true} model=${BENCH_MODEL:-bench/models/kata1-b18c384nbt.bpk}
+fi
+
 env RUST_LOG="${RUST_LOG:-info}" \
-  KATAGO_WS_ENGINE__BINARY="${BENCH_KATAGO:-bench/katago-dist/katago}" \
+  KATAGO_WS_ENGINE__BINARY="${BENCH_KATAGO:-bench/katago-rs}" \
+  KATAGO_WS_ENGINE__BACKEND="$BENCH_BACKEND" \
+  KATAGO_WS_ENGINE__FP16="$fp16" \
   KATAGO_WS_ENGINE__CONFIG="$cfg" \
-  KATAGO_WS_ENGINE__MODEL="${BENCH_MODEL:-bench/models/g170e-b10c128.bin.gz}" \
+  KATAGO_WS_ENGINE__MODEL="$model" \
   KATAGO_WS_ENGINE__MAX_VISITS="${BENCH_MAX_VISITS:-100}" \
   KATAGO_WS_ENGINE__ANALYSIS_THREADS=0 \
   KATAGO_WS_ENGINE__SEARCH_THREADS_PER_ANALYSIS=0 \
