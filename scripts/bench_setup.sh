@@ -14,7 +14,7 @@
 #
 # katago-rs compiles its nets in from ONNX: the .bin.gz nets are downloaded to bench/nets/ and converted with
 # katago-rs's tools/bin2onnx (`just convert`, its .venv) when its models/onnx/ lacks them. BENCH_FEATURES picks
-# the backends (default flex,wgpu, plus rocm when hipconfig is on the PATH); a rebuild (new katago-rs commit,
+# the backends (default flex,wgpu, plus rocm when ROCm's HIP runtime is installed); a rebuild (new katago-rs commit,
 # other features) needs `rm bench/katago-rs`.
 #
 # Games are public 19x19 OGS games of >=120 moves, fetched politely one by one.
@@ -27,7 +27,7 @@ rs=$(realpath "${KATAGO_RS:-../katago-rs}")
 games=${BENCH_GAMES:-300}
 if [[ -z ${BENCH_FEATURES:-} ]]; then
   BENCH_FEATURES=flex,wgpu
-  command -v hipconfig >/dev/null && BENCH_FEATURES+=,rocm
+  [[ -e ${ROCM_PATH:-/opt/rocm}/lib/libamdhip64.so ]] && BENCH_FEATURES+=,rocm
 fi
 
 mkdir -p bench/nets bench/models bench/cfg bench/sgf bench/sgf-quick bench/sgf-large bench/results bench/logs

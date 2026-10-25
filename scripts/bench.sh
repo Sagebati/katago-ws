@@ -20,8 +20,8 @@
 #   prod      bench/sgf-large, ~300 games (~45 min). Sustained, final numbers.
 #
 # Defaults (override in the environment): BENCH_PRESET, BENCH_BASE_CFG,
-# BENCH_KATAGO (bench/katago-rs), BENCH_BACKEND (rocm when hipconfig is on the
-# PATH, else wgpu; or flex), BENCH_FP16 (true on a GPU backend), BENCH_MODEL
+# BENCH_KATAGO (bench/katago-rs), BENCH_BACKEND (rocm when ROCm's HIP runtime is
+# installed, else wgpu; or flex), BENCH_FP16 (true on a GPU backend), BENCH_MODEL
 # (b18c384nbt on a GPU, b10c128 on flex: the images' defaults), BENCH_CORPUS
 # (wins over the preset), BENCH_CONCURRENCY, BENCH_MAX_VISITS. Requires a
 # release build and scripts/bench_setup.sh.
@@ -71,7 +71,7 @@ done
 
 if [[ -z ${BENCH_BACKEND:-} ]]; then
   BENCH_BACKEND=wgpu
-  command -v hipconfig >/dev/null && BENCH_BACKEND=rocm
+  [[ -e ${ROCM_PATH:-/opt/rocm}/lib/libamdhip64.so ]] && BENCH_BACKEND=rocm
 fi
 if [[ $BENCH_BACKEND == flex ]]; then
   fp16=${BENCH_FP16:-false} model=${BENCH_MODEL:-bench/models/g170e-b10c128.bpk}

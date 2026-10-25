@@ -184,7 +184,7 @@ with a warning instead).
 ### Benchmarking the worker
 
 `scripts/bench_setup.sh` fills the gitignored `bench/` (katago-rs built from the
-sibling `../katago-rs` with flex, wgpu and — when `hipconfig` is on the PATH — rocm, its
+sibling `../katago-rs` with flex, wgpu and — when ROCm's HIP runtime is installed — rocm, its
 nets as `.bpk`, an OGS game corpus). `just bench LABEL [cfgKey=value …] [env.KATAGO_WS_X=…]`
 runs one benchmark against a derived analysis config (`just bench-quick` = 6 games,
 ~1 min, for fast A/B; `just bench-prod` = ~300 games, ~45 min, for final numbers;
