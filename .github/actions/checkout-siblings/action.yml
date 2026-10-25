@@ -2,19 +2,16 @@ name: checkout-siblings
 description: >
   Checks out the sibling muxa/pgmq repos this crate path-depends on, at the
   refs pinned in sibling-refs.env, into ./muxa and ./pgmq relative to the
-  workspace root, and with `katago-rs-ssh-key` also the engine repo into
+  workspace root, and with `katago-rs: true` also the engine repo into
   ./katago-rs (the image builds need it; the test job doesn't). Run this
   *after* checking out katago-ws itself (that first checkout can't be wrapped
   here, since this action lives inside it).
 
 inputs:
-  katago-rs-ssh-key:
-    description: >
-      A read-only deploy key of the private katago-rs repo (pass
-      secrets.KATAGO_RS_DEPLOY_KEY: a composite action can't read secrets
-      itself). Empty: katago-rs is not checked out.
+  katago-rs:
+    description: Also check out the engine, katago-rs, into ./katago-rs.
     required: false
-    default: ""
+    default: "false"
 
 runs:
   using: composite
@@ -47,10 +44,9 @@ runs:
 
     # Without submodules: the image builds don't read katago-rs's upstream/.
     - name: Checkout katago-rs (the engine, pinned)
-      if: inputs.katago-rs-ssh-key != ''
+      if: inputs.katago-rs == 'true'
       uses: actions/checkout@v7
       with:
         repository: ${{ env.KATAGO_RS_REPO }}
         ref: ${{ env.KATAGO_RS_REF }}
-        ssh-key: ${{ inputs.katago-rs-ssh-key }}
         path: katago-rs

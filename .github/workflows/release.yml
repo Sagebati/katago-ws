@@ -104,7 +104,7 @@ jobs:
       - name: Checkout siblings (katago-rs)
         uses: ./katago-ws/.github/actions/checkout-siblings
         with:
-          katago-rs-ssh-key: ${{ secrets.KATAGO_RS_DEPLOY_KEY }}
+          katago-rs: true
 
       - uses: actions/download-artifact@v8
         with:
