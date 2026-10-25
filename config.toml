@@ -60,13 +60,18 @@ max_connections = 10
 # [pgmq] section needed. The queue name is not configurable.
 
 [engine]
-# KataGo analysis engine. The service launches `katago analysis -config <config>
-# -model <model>` as a long-lived subprocess and drives it over JSON. These are
-# the local-dev paths (the container overrides them via KATAGO_WS_ENGINE__BINARY /
-# KATAGO_WS_ENGINE__CONFIG / KATAGO_WS_ENGINE__MODEL).
-binary = "katago"
+# katago-rs analysis engine (KataGo's analysis protocol, in Rust). The service
+# launches `katago-rs analysis -backend <backend> -config <config> -model <model>`
+# as a long-lived subprocess and drives it over JSON. These are the local-dev
+# paths (the images set KATAGO_WS_ENGINE__BINARY / __BACKEND / __FP16 / __CONFIG /
+# __MODEL). The model is one of the nets compiled into the binary, as a .bpk
+# named after the net (katago-rs matches the file stem): scripts/bench_setup.sh
+# puts the binary and its nets in bench/.
+binary = "katago-rs"
 config = "analysis.cfg"
-model = "model.bin.gz"
+model = "g170e-b10c128.bpk"
+# backend = "flex"                   # flex (CPU) | wgpu (Vulkan, Metal, DX12) | rocm (HIP)
+# fp16 = false                       # GPU backends: f16 convolutions (burnUseFP16)
 # Analysis tuning (max_visits, analysis_pv_len, include_ownership,
 # include_ownership_stdev, include_policy, top_k, default_komi,
 # default_board_size, request_timeout_secs) defaults to the values in
@@ -74,9 +79,9 @@ model = "model.bin.gz"
 #
 # Human SL network (`-human-model`): jobs submitted with a `human_profile` then
 # get the human policy. Empty = none. See README "Human policy".
-# human_model = "b18c384nbt-humanv0.bin.gz"
+# human_model = "b18c384nbt-humanv0.bpk"
 #
-# Throughput (see README "Throughput tuning"). Passed to KataGo as
+# Throughput (see README "Throughput tuning"). Passed to katago-rs as
 # `-override-config`; 0 / empty keeps analysis.cfg's value.
 # analysis_threads = <system threads> # numAnalysisThreads: positions in parallel
 # search_threads_per_analysis = 1     # numSearchThreadsPerAnalysisThread
@@ -84,16 +89,15 @@ model = "model.bin.gz"
 # nn_server_threads = 0               # numNNServerThreadsPerModel (one per GPU)
 # override_config = ""                # extra raw "key=value,key=value"
 #
-# Startup auto-tune (on by default): before launching KataGo, short trials pick
-# nn_server_threads x nn_max_batch_size, analysis_threads and (OpenCL) the
-# device — ROCm over Mesa rusticl when both expose the GPU — and cache the
-# result, so later starts skip it. The four settings above are kept when set
+# Startup auto-tune (on by default, GPU backends only): before launching the
+# engine, short trials pick nn_server_threads x nn_max_batch_size and
+# analysis_threads, and cache the result, so later starts skip it. The four settings above are kept when set
 # here or via env (as is any key in override_config); only the rest are tuned.
 # Any failure falls back to the config as given.
 # autotune = true                    # KATAGO_WS_ENGINE__AUTOTUNE=false disables it
 # autotune_mode = "thorough"         # or "fast": under ~30 s, guided by GPU size + backend
-# autotune_cache = ""                # "" = ~/.katago/katago-ws-autotune.json (next to opencltuning/)
-# autotune_timeout_secs = 300        # incl. KataGo's first-use OpenCL kernel tuning
+# autotune_cache = ""                # "" = ~/.katago/katago-ws-autotune.json
+# autotune_timeout_secs = 300        # incl. the GPU kernels' first-use compile
 # One-shot, outside any role: `katago-ws autotune [--fast] [--force]`.
 #
 # Two-pass analysis: screen every move at screen_visits, re-search at max_visits
@@ -111,7 +115,7 @@ model = "model.bin.gz"
 # client_token = "…"
 
 [ratelimit]
-# Per-IP rate limit on POST /analyse, the public way to queue KataGo work
+# Per-IP rate limit on POST /analyse, the public way to queue analysis work
 # (POST /analyse/batch is gated by [api].client_token, when set, instead).
 # In-memory, per instance — a coarse abuse guard, not a global cap (each replica
 # has its own buckets). GCRA quota: one submit allowance restored every
@@ -131,12 +135,12 @@ trust_forwarded_for = false
 # for common [engine]/[worker] keys (`katago-ws worker --threads 8 --slots 4`),
 # which win over this file and env; `katago-ws worker --help` lists them. `standalone` = web + in-process
 # workers (one process). `orchestrator` = web + pgmq + the cluster WebSocket
-# dispatcher (served at `/cluster` on the web port; no engine). `worker` = KataGo +
+# dispatcher (served at `/cluster` on the web port; no engine). `worker` = engine +
 # WebSocket client dialing the orchestrator (no Postgres); serves /healthz only.
 
 [worker]
 # Consumer lease loops (standalone/orchestrator) AND the slots a worker advertises:
-# games in flight per engine. A few keep KataGo's queue from draining.
+# games in flight per engine. A few keep the engine's queue from draining.
 concurrency = 4
 # Visibility timeout while a job is in flight (the worker heartbeats to extend
 # it). Below the config.rs default of 600 — the heartbeat re-arms it as needed.

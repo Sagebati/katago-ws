@@ -125,6 +125,13 @@ pub async fn apply(
         tracing::info!("autotune: disabled ([engine] autotune = false)");
         return cfg;
     }
+    if !cfg.backend.is_gpu() {
+        tracing::info!(
+            backend = cfg.backend.as_arg(),
+            "autotune: skipped (CPU inference: the tuned settings are GPU knobs)"
+        );
+        return cfg;
+    }
     let pinned = pins(&cfg, explicit);
     if !pinned.is_empty() {
         tracing::info!(
@@ -169,10 +176,6 @@ pub async fn apply(
          (a first run on a new GPU also compiles its kernels)"
     );
     match tokio::time::timeout(budget, tune(&cfg, &pinned, concurrency)).await {
-        Ok(Ok(Tuned::Skipped(why))) => {
-            tracing::info!("autotune: skipped ({why})");
-            cfg
-        }
         Ok(Ok(Tuned::Done {
             tuned,
             rate,
@@ -296,7 +299,6 @@ fn launch_cfg(cfg: &EngineConfig, over: &Overrides) -> EngineConfig {
 }
 
 enum Tuned {
-    Skipped(String),
     Done {
         /// Only the keys the tuner chose (pinned keys excluded).
         tuned: Overrides,
@@ -309,11 +311,6 @@ enum Tuned {
 async fn tune(cfg: &EngineConfig, pinned: &Overrides, concurrency: usize) -> Result<Tuned, String> {
     let backend = cfg.backend;
     tracing::info!(backend = backend.as_arg(), "autotune: engine backend");
-    if !backend.is_gpu() {
-        return Ok(Tuned::Skipped(
-            "flex backend: CPU inference, these settings are GPU knobs".to_owned(),
-        ));
-    }
 
     let depth = concurrency * POSITIONS_PER_GAME;
     let clock = Instant::now();

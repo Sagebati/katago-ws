@@ -2,7 +2,7 @@
 
 The light **orchestrator** runs on your Coolify VPS (always-on ⇒ no cron). It owns
 the public API + the cluster WebSocket; **workers dial in** over `wss://`. Postgres
-stays on **Supabase**. KataGo runs only on the workers, never here.
+stays on **Supabase**. The engine (katago-rs) runs only on the workers, never here.
 
 ```
   clients ──HTTPS──►  Coolify (Traefik+TLS) ──►  orchestrator :3000  ──►  Supabase Postgres
@@ -10,9 +10,9 @@ stays on **Supabase**. KataGo runs only on the workers, never here.
 ```
 
 ## 1. Image (ghcr.io)
-Coolify can't build the Dockerfile (it needs the sibling `muxa`/`pgmq` crates), so
-it pulls a prebuilt image. The `image.yml` workflow builds + pushes
-`ghcr.io/sagebati/katago-ws:latest` on every push to `main`.
+Coolify can't build the Dockerfile (it needs the sibling `muxa`/`pgmq`/`katago-rs`
+checkouts), so it pulls a prebuilt image. The `image.yml` workflow builds + pushes
+`ghcr.io/sagebati/katago-ws:latest` (the `cpu` image) on every push to `main`.
 
 Make sure Coolify can pull it — **one of**:
 - Make the **ghcr package public** (GitHub → your profile → Packages → `katago-ws`
@@ -101,7 +101,7 @@ What lands in Sentry once the DSN is set:
 
 The DSN is a `SecretString`: it's redacted from `Debug`/logs, so it won't leak into
 the dashboard or traces. Workers can take the same `KATAGO_WS_SENTRY__DSN` to report
-their own KataGo-side errors; tag them apart with `KATAGO_WS_SENTRY__ENVIRONMENT`.
+their own engine-side errors; tag them apart with `KATAGO_WS_SENTRY__ENVIRONMENT`.
 
 ## 7. Auto-deploy (optional)
 Add the repo secret `COOLIFY_DEPLOY_HOOK` (your Coolify resource's deploy webhook

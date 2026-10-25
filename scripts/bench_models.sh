@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Benchmark every model in bench/models/ under the same KataGo config, then
+# Benchmark every model in bench/models/ under the same analysis config, then
 # tabulate throughput and quality side by side.
 #
 #   scripts/bench_models.sh [PREFIX] [cfg.key=value ...] [env.KATAGO_WS_X=value ...]
@@ -9,8 +9,9 @@
 #
 # Each run is `scripts/bench.sh PREFIX-<model> ARGS...` with BENCH_MODEL set, so
 # reports land in bench/results/PREFIX-<model>.json. MODELS (space-separated
-# basenames without .bin.gz) restricts the set; default is every file in
-# bench/models/. Models are run smallest file first, so quick results come early.
+# basenames without .bpk) restricts the set; default is every net in bench/models/
+# but the human-SL one. Models are run smallest file first, so quick results come
+# early. BENCH_BACKEND etc. apply as in bench.sh.
 #
 # Quality is scored against REF (default bench/results/ref-b18-v1000.json, a
 # high-visit run of one strong model — make one with BENCH_MAX_VISITS=1000 and
@@ -27,14 +28,14 @@ ref=${REF:-bench/results/ref-b18-v1000.json}
 if [[ -n ${MODELS:-} ]]; then
   read -ra names <<<"$MODELS"
   files=()
-  for name in "${names[@]}"; do files+=("bench/models/$name.bin.gz"); done
+  for name in "${names[@]}"; do files+=("bench/models/$name.bpk"); done
 else
-  mapfile -t files < <(ls -Sr bench/models/*.bin.gz)
+  mapfile -t files < <(ls -Sr bench/models/*.bpk | grep -v human)
 fi
 
 reports=()
 for file in "${files[@]}"; do
-  name=$(basename "$file" .bin.gz)
+  name=$(basename "$file" .bpk)
   label="$prefix-$name"
   echo "== $name"
   BENCH_MODEL="$file" scripts/bench.sh "$label" "$@" |

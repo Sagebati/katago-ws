@@ -1,7 +1,9 @@
 # katago-ws
 
-A queued **SGF (Go game record) analysis microservice**. You `POST` a game, a
-[KataGo](https://github.com/lightvector/KataGo) engine replays it move-by-move,
+A queued **SGF (Go game record) analysis microservice**. You `POST` a game,
+[katago-rs](https://github.com/Sagebati/katago-rs) (a Rust port of
+[KataGo](https://github.com/lightvector/KataGo)'s analysis engine, on CPU, Vulkan
+or ROCm) replays it move-by-move,
 and you read back an annotated analysis — every move scored, classified, and
 summarised.
 
@@ -18,7 +20,7 @@ domain logic (engine, queue, job store, HTTP surface).
                                           ▲   reads/writes           │ lease
                                           │                          ▼
                                     ┌─────┴───────┐  analyze   ┌───────────┐
-                                    │  Postgres   │ ◄───────── │  worker   │ ──► KataGo
+                                    │  Postgres   │ ◄───────── │  worker   │ ──► katago-rs
                                     │ jobs table  │  result    │ loop      │
                                     └─────────────┘            └───────────┘
 ```
@@ -47,7 +49,7 @@ The role is the **first CLI argument** (or the `KATAGO_WS_ROLE` env var):
 |------|--------------|:--------:|:------:|
 | **`standalone`** (default) | web API + in-process worker loops | ✓ | ✓ |
 | **`orchestrator`** | web API + pgmq + the cluster dispatcher | ✓ | ✗ |
-| **`worker`** | KataGo + cluster client (dials the orchestrator) | ✗ | ✓ |
+| **`worker`** | engine + cluster client (dials the orchestrator) | ✗ | ✓ |
 
 `orchestrator` + N `worker`s let the API and the engine scale independently when
 workers can't reach Postgres directly. Workers connect over a **WebSocket** at
@@ -129,6 +131,7 @@ top-left (A19 → T1), and all-or-nothing: present for every turn or absent.
 | `moves[].top_moves[].human_prior` | v3 | human policy of the candidate; only with `human_policy` |
 | `engine.ownership_stdev` / `engine.policy` | v3 | whether those grids are present |
 | `engine.human_model` | v3 | the human SL network file, when `human_policy` is present |
+| `engine.name` / `engine.version` / `engine.model` | v3 | `katago-rs`, the KataGo version its analysis engine matches (e.g. `1.16.5`), and the net (`kata1-b18c384nbt`) |
 
 Principal variations (`top_moves[].pv`) run to 15 moves by default
 (`[engine] analysis_pv_len`), bounded by how deep the search went. A 325-move
@@ -142,14 +145,14 @@ KataGo's human SL network predicts how a player of a given rank would play.
 With it loaded, a job that names a `human_profile` gets that player's policy
 for every position (`human_policy`) and for each move (`human_prior`).
 
-1. Download the network, `b18c384nbt-humanv0.bin.gz` (~100 MB), from the
-   [KataGo v1.15.0 release](https://github.com/lightvector/KataGo/releases/tag/v1.15.0).
-   The images don't bundle it.
-2. Point the worker at it: `KATAGO_WS_ENGINE__HUMAN_MODEL=/path/to/b18c384nbt-humanv0.bin.gz`
-   (in Docker, mount it, e.g. `-v ./b18c384nbt-humanv0.bin.gz:/opt/katago/human.bin.gz:ro
-   -e KATAGO_WS_ENGINE__HUMAN_MODEL=/opt/katago/human.bin.gz`). KataGo then runs
-   with `-human-model`, which takes roughly another 100 MB of VRAM; the network
-   is evaluated once per position, not per visit, so search speed is unchanged.
+1. The `vulkan` and `rocm` images bundle the network (`b18c384nbt-humanv0`,
+   compiled into katago-rs like the main nets); the `cpu` image doesn't.
+2. Point the worker at it: `KATAGO_WS_ENGINE__HUMAN_MODEL=/opt/katago-rs/nets/b18c384nbt-humanv0.bpk`
+   (or `--human-model`). katago-rs then runs with `-human-model`, which takes
+   roughly another 100 MB of VRAM; the network is evaluated once per position,
+   not per visit, so search speed is unchanged. Outside the images, it is the
+   `.bpk` from a katago-rs build with the `net-b18c384nbt-humanv0` feature
+   (`scripts/bench_setup.sh` puts one in `bench/models/`).
 3. Submit with a profile: `POST /analyse?human_profile=rank_5k`, or
    `{"sgf": "…", "human_profile": "rank_5k"}` in a batch.
 
@@ -165,16 +168,18 @@ model on all of them or a job's human policy depends on which one took it.
 
 ## Quick start
 
-The build needs the sibling `../muxa` and `../pgmq` path-deps present.
+The build needs the sibling `../muxa` and `../pgmq` path-deps present; running
+an engine role needs a katago-rs binary and its nets (`scripts/bench_setup.sh`
+builds them from `../katago-rs` into `bench/`).
 
 ```bash
-# Everything in Docker (Postgres + the app, CPU KataGo + model bundled, no GPU):
+# Everything in Docker (Postgres + the app, katago-rs on the CPU + b10 net bundled, no GPU):
 docker compose up --build
 
 # Or run locally against your own Postgres (DB named `goban`):
 cargo run                   # standalone — migrations apply automatically at startup
 cargo run -- orchestrator   # web + pgmq + cluster dispatcher (no engine)
-cargo run -- worker         # KataGo + cluster client (no Postgres)
+cargo run -- worker         # engine + cluster client (no Postgres)
 ```
 
 A Postgres database named `goban` is required for `standalone`/`orchestrator`
@@ -182,32 +187,35 @@ A Postgres database named `goban` is required for `standalone`/`orchestrator`
 embedded and applied at startup — don't run them by hand. The `worker` role needs
 no database.
 
-To run a **worker** from the published image — no build, no Postgres, just KataGo
+To run a **worker** from the published image — no build, no Postgres, just the engine
 dialing the deployed orchestrator over `wss://` (the `worker` is the final image
 argument; the engine binary + model are baked in):
 
 ```bash
-# CPU (Eigen) build — runs anywhere, no GPU:
+# CPU build — runs anywhere, no GPU:
 docker run --rm \
   -e KATAGO_WS_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
   -e KATAGO_WS_ENGINE__MAX_VISITS=20 \
   ghcr.io/sagebati/katago-ws:latest worker
 
-# NVIDIA GPU — add `--gpus all` and use the :cuda tag:
-docker run --rm --gpus all \
+# AMD GPU that ROCm supports (RDNA2+/CDNA) — the KFD + DRM devices and the
+# host's video/render groups, :rocm tag:
+docker run --rm --device /dev/kfd --device /dev/dri \
+  --group-add "$(getent group video | cut -d: -f3)" \
+  --group-add "$(getent group render | cut -d: -f3)" \
   -e KATAGO_WS_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
-  ghcr.io/sagebati/katago-ws:cuda worker
+  ghcr.io/sagebati/katago-ws:rocm worker
 
-# AMD/Intel GPU via OpenCL — pass the render device and use the :opencl tag:
+# Any other GPU through Vulkan, :vulkan tag — AMD/Intel: the render device;
+# NVIDIA: `--gpus all` (NVIDIA Container Toolkit) instead:
 docker run --rm --device /dev/dri \
+  --group-add "$(getent group render | cut -d: -f3)" \
   -e KATAGO_WS_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
-  ghcr.io/sagebati/katago-ws:opencl worker
+  ghcr.io/sagebati/katago-ws:vulkan worker
 ```
 
-The OpenCL image drives the GPU through Mesa's **rusticl** (`RUSTICL_ENABLE=radeonsi,iris`
-is baked in; override the build arg for another gallium driver). Mesa's older
-Clover is deliberately absent — it can't build KataGo's kernels on RDNA2 and
-newer. NVIDIA cards should use the `:cuda` tag rather than OpenCL.
+The GPU images run b18c384nbt in f16; the CPU image runs b10c128.
+[deploy/split/README.md](deploy/split/README.md#picking-a-worker-image) compares them.
 
 `ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster` is the deployed orchestrator (it's
 the `[worker].orchestrator_url` default, so a worker dials it even without the env
@@ -234,12 +242,13 @@ production, not the committed file.
 | `KATAGO_WS_ENV` | Run mode: `development` / `production` (default: from build profile). Drives Sentry env + sample rates. |
 | `KATAGO_WS_DIESEL__URL` | Postgres URL (use Supabase's **session** pooler, port 5432, in prod). |
 | `KATAGO_WS_WEB__HOST` / `KATAGO_WS_WEB__PORT` | Bind address (default `0.0.0.0:3000`). |
-| `KATAGO_WS_ENGINE__MAX_VISITS` | KataGo visits per move. **Keep modest (8–50)** so a game finishes inside the lease. |
-| `KATAGO_WS_ENGINE__BINARY` / `__CONFIG` / `__MODEL` | KataGo paths (the image sets these). |
-| `KATAGO_WS_ENGINE__ANALYSIS_THREADS` / `__SEARCH_THREADS_PER_ANALYSIS` | KataGo `numAnalysisThreads` × `numSearchThreadsPerAnalysisThread` (default: system threads × `1`, the throughput preset). See [Throughput tuning](#throughput-tuning). |
-| `KATAGO_WS_ENGINE__NN_MAX_BATCH_SIZE` / `__NN_SERVER_THREADS` / `__OVERRIDE_CONFIG` | More KataGo overrides (`0` / empty = keep `analysis.cfg`). |
+| `KATAGO_WS_ENGINE__MAX_VISITS` | Visits per move. **Keep modest (8–50)** so a game finishes inside the lease. |
+| `KATAGO_WS_ENGINE__BINARY` / `__CONFIG` / `__MODEL` | katago-rs paths (the image sets these). The model is a `.bpk` named after a net compiled into the binary. |
+| `KATAGO_WS_ENGINE__BACKEND` / `__FP16` | katago-rs's `-backend` (`flex` = CPU, `wgpu` = Vulkan, `rocm` = HIP; the binary must have it compiled in) and f16 convolutions on a GPU backend (`burnUseFP16`). The image sets these. |
+| `KATAGO_WS_ENGINE__ANALYSIS_THREADS` / `__SEARCH_THREADS_PER_ANALYSIS` | `numAnalysisThreads` × `numSearchThreadsPerAnalysisThread` (default: system threads × `1`, the throughput preset). See [Throughput tuning](#throughput-tuning). |
+| `KATAGO_WS_ENGINE__NN_MAX_BATCH_SIZE` / `__NN_SERVER_THREADS` / `__OVERRIDE_CONFIG` | More engine overrides (`0` / empty = keep `analysis.cfg`). |
 | `KATAGO_WS_ENGINE__AUTOTUNE` / `__AUTOTUNE_MODE` | Startup throughput auto-tune: on by default (`false` = off); `thorough` (default) or `fast` (under ~30 s). See [Throughput tuning](#throughput-tuning). |
-| `KATAGO_WS_ENGINE__HUMAN_MODEL` | KataGo human SL network (`-human-model`); empty (default) = none. See [Human policy](#human-policy). |
+| `KATAGO_WS_ENGINE__HUMAN_MODEL` | Human SL network (`-human-model`, a `.bpk`); empty (default) = none. See [Human policy](#human-policy). |
 | `KATAGO_WS_ENGINE__INCLUDE_OWNERSHIP_STDEV` / `__INCLUDE_POLICY` / `__ANALYSIS_PV_LEN` | Payload contents: the `ownership_stdev` and `policy` grids (default `true`) and PV length (default `15`). |
 | `KATAGO_WS_ENGINE__SCREEN_VISITS` | Two-pass analysis: screen every move at this many visits, re-search only the swings at `MAX_VISITS` (default `0` = off). |
 | `KATAGO_WS_WORKER__CONCURRENCY` | Worker lease loops / advertised slots (games in flight per engine; default `4`). |
@@ -272,11 +281,11 @@ reports, in Sentry, all of:
     picked it up. Rising means the workers can't keep up.
   - `katago_ws.moves.analyzed` — counter: moves in completed games. **Its rate is
     the throughput number to watch** (jobs/s isn't: game lengths vary too much).
-  - `katago_ws.positions.analyzed{pass}` — counter: positions KataGo searched, by
+  - `katago_ws.positions.analyzed{pass}` — counter: positions the engine searched, by
     `pass` (`full`, or `screen`/`refine` with two-pass analysis).
 - **Job traces** — each queue delivery is an `analysis_job` transaction (job id,
   attempt), with a `queue.process` span, the DB writes, `katago.analyze` (moves,
-  refined turns) and one `katago.pass` span per KataGo query (pass, positions,
+  refined turns) and one `katago.pass` span per engine query (pass, positions,
   visits) beneath it. In the `orchestrator` + `worker` split the job request carries
   the trace, so the worker's `cluster.job` (with the engine spans) joins the same
   trace.
@@ -291,22 +300,23 @@ Grafana/Prometheus dashboards.
 
 ## Throughput tuning
 
-**Auto-tune.** Before launching KataGo, every engine role measures a few
-`numNNServerThreadsPerModel` × `nnMaxBatchSize` / `numAnalysisThreads` settings on
-this GPU with short trials, picks the OpenCL device (AMD's ROCm runtime over Mesa
-rusticl when both expose the card), and caches the winner in
-`~/.katago/katago-ws-autotune.json`, so only the first start pays for it (~1–1.5 min,
-or under ~30 s with `KATAGO_WS_ENGINE__AUTOTUNE_MODE=fast`). Settings you give
+**Auto-tune.** Before launching the engine on a GPU backend, every engine role
+measures a few `numNNServerThreadsPerModel` × `nnMaxBatchSize` /
+`numAnalysisThreads` settings on this GPU with short trials and caches the winner
+in `~/.katago/katago-ws-autotune.json` (keyed by GPU, binary, model, backend and
+precision), so only the first start pays for it (a few minutes, or under ~30 s
+with `KATAGO_WS_ENGINE__AUTOTUNE_MODE=fast`). On an RX 6800 XT with ROCm and
+b18c384nbt it picks 8 × 64 with 256 analysis threads. Settings you give
 explicitly are kept and only the rest are tuned; `KATAGO_WS_ENGINE__AUTOTUNE=false`
-turns it off. `katago-ws autotune [--fast] [--force]` runs it once and exits. In
-Docker, mount a volume on `/home/app/.katago` so the result (and KataGo's own
-OpenCL kernel tuning) survives restarts.
+turns it off, and the CPU backend skips it. `katago-ws autotune [--fast] [--force]`
+runs it once and exits. In Docker, mount a volume on `/home/app/.katago` so the
+result survives restarts.
 
-KataGo's analysis engine already batches neural-net evaluations across every
+The analysis engine batches neural-net evaluations across every
 position it is searching, so throughput comes from keeping that batch full and not
 wasting visits:
 
-- **Many positions, few threads each.** A game goes to KataGo as one query covering
+- **Many positions, few threads each.** A game goes to the engine as one query covering
   every turn, so hundreds of positions are always queued. The default overrides
   (passed as `-override-config`) search one position per hardware thread the
   process may use (`numAnalysisThreads` = the system's thread count, cgroup limits
@@ -316,12 +326,12 @@ wasting visits:
   (mid-tier 32–64, strong 64–256) and keep `NN_MAX_BATCH_SIZE` ≥ analysis × search
   threads ÷ GPUs.
 - **Keep the queue fed.** `WORKER__CONCURRENCY` (default 4) games in flight per
-  engine stops KataGo's queue draining at the tail of a game.
+  engine stops the engine's queue draining at the tail of a game.
 - **Two-pass analysis** (`ENGINE__SCREEN_VISITS`, off by default). Every turn is
   screened at `SCREEN_VISITS` (e.g. 16–32); only the turns either side of a move
   whose screened win rate or score swings by `REFINE_WINRATE_DELTA` (0.03) or
   `REFINE_SCORE_DELTA` (1.0 point), in either direction, are re-searched at
-  `MAX_VISITS`, ahead of other games in KataGo's queue. Quiet moves keep their
+  `MAX_VISITS`, ahead of other games in the engine's queue. Quiet moves keep their
   shallow result, so their candidates carry fewer visits; the payload records
   `engine.screen_visits` when this ran. `positions.analyzed{pass}` shows how much
   is refined.
@@ -330,20 +340,23 @@ Compare settings by the rate of `katago_ws.moves.analyzed` on the same set of ga
 
 ## Building images
 
-One Dockerfile, three KataGo backends (build context is the **parent** dir so the
-`muxa`/`pgmq` path-deps are included):
+One Dockerfile, three katago-rs backends (build context is the **parent** dir so
+the sibling `muxa`/`pgmq`/`katago-rs` checkouts are included; the Dockerfile builds
+katago-rs and converts its nets from KataGo's `.bin.gz` releases):
 
 ```bash
-just cpu        # Eigen — pure CPU, runs anywhere (this is :latest on ghcr)
-just cuda       # NVIDIA — run with `--gpus all`
-just opencl     # AMD/Intel/NVIDIA via OpenCL — run with `--device /dev/dri`
+just cpu        # flex — pure CPU, b10c128, runs anywhere (this is :latest on ghcr)
+just vulkan     # wgpu — Vulkan (Mesa RADV/ANV, NVIDIA's driver), b18c384nbt f16
+just rocm       # HIP — AMD GPUs that ROCm supports, b18c384nbt f16
 just all
 ```
 
 CI ([`.github/workflows/image.yml`](.github/workflows/image.yml)) builds + pushes
-all three to `ghcr.io/sagebati/katago-ws` on every push to `main` (`:latest` = CPU).
-A host that can't build the Dockerfile (it needs the sibling crates) just pulls the
-image.
+all three to `ghcr.io/sagebati/katago-ws` on every push to `main` (`:latest` = CPU);
+katago-rs is a private repository, checked out with the `KATAGO_RS_DEPLOY_KEY`
+secret (a read-only deploy key on `Sagebati/katago-rs`) at the ref pinned in
+`.github/sibling-refs.env`. A host that can't build the Dockerfile (it needs the
+sibling checkouts) just pulls the image.
 
 ## Releases
 
@@ -355,11 +368,11 @@ tag and a GitHub Release.
 A `vX.Y.Z` tag triggers [`.github/workflows/release.yml`](.github/workflows/release.yml),
 which compiles the `x86_64-unknown-linux-gnu` binary once and reuses it for:
 
-- Versioned images: `ghcr.io/sagebati/katago-ws:{cpu,cuda,opencl}-vX.Y.Z`
+- Versioned images: `ghcr.io/sagebati/katago-ws:{cpu,vulkan,rocm}-vX.Y.Z`
 - A binary asset on the GitHub Release: `katago-ws-x86_64-unknown-linux-gnu.tar.gz`
   (+ a `.sha256` checksum)
 
-This is purely additive — the rolling `:cpu`/`:cuda`/`:opencl`/`:latest`/`:<variant>-<sha>`
+This is purely additive — the rolling `:cpu`/`:vulkan`/`:rocm`/`:latest`/`:<variant>-<sha>`
 tags that `image.yml` produces on every `main` push, and the Coolify deploy that
 tracks `:latest`, are unchanged. Versioned tags exist for traceability and manual
 rollback (`docker pull ghcr.io/sagebati/katago-ws:cpu-v1.2.0`), not (yet) for any
@@ -369,7 +382,7 @@ automated deploy.
 # Run a worker from any of the three images, pointed at a deployed orchestrator —
 # pick the tag for the host's accelerator; the run flags differ per backend.
 
-# CPU (Eigen) — any host, no GPU:
+# CPU — any host, no GPU:
 docker run --rm \
   -e KATAGO_WS_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
   -e KATAGO_WS_ENGINE__MAX_VISITS=20 \
@@ -380,24 +393,24 @@ docker run --rm ghcr.io/sagebati/katago-ws:latest worker \
   --orchestrator ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
   --visits 20 --threads 8
 
-# NVIDIA GPU (CUDA) — add `--gpus all` (needs the NVIDIA Container Toolkit):
+# AMD GPU (ROCm) — the KFD + DRM devices and the host's video/render groups:
+docker run --rm --device /dev/kfd --device /dev/dri \
+  --group-add "$(getent group video | cut -d: -f3)" \
+  --group-add "$(getent group render | cut -d: -f3)" \
+  -e KATAGO_WS_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
+  ghcr.io/sagebati/katago-ws:rocm worker
+
+# NVIDIA GPU (Vulkan) — add `--gpus all` (needs the NVIDIA Container Toolkit):
 docker run --rm --gpus all \
   -e KATAGO_WS_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
-  -e KATAGO_WS_ENGINE__MAX_VISITS=20 \
-  ghcr.io/sagebati/katago-ws:cuda worker
-
-# AMD/Intel GPU (OpenCL) — pass the render node `/dev/dri`:
-docker run --rm --device /dev/dri \
-  -e KATAGO_WS_WORKER__ORCHESTRATOR_URL=ws://tfskksv6ajdzz6nyml575ujx.54.36.100.240.sslip.io/cluster \
-  -e KATAGO_WS_ENGINE__MAX_VISITS=20 \
-  ghcr.io/sagebati/katago-ws:opencl worker
+  ghcr.io/sagebati/katago-ws:vulkan worker
 ```
 
 ## Deployment
 
 The light **orchestrator** runs on a small always-on host (Postgres can live
 elsewhere, e.g. Supabase); **workers dial in** over `wss://` and do the heavy
-KataGo work. See [`deploy/coolify/`](deploy/coolify/) for a Coolify + Supabase
+engine work. See [`deploy/coolify/`](deploy/coolify/) for a Coolify + Supabase
 setup, including the Sentry and TLS notes.
 
 > ⚠️ The `/cluster` socket is public when no `KATAGO_WS_ORCHESTRATOR__AUTH_TOKEN` is set —
@@ -414,7 +427,7 @@ src/
   db/            the jobs store (submit, state transitions, queries) + schema
   queue.rs       the pgmq `analysis` queue + JobMessage (carries the SGF)
   worker.rs      worker_loop + Executor trait (Local vs remote) + VtHeartbeat
-  engine/        KataGo subprocess driver: sgf → katago JSON → annotate
+  engine/        katago-rs subprocess driver: sgf → analysis JSON → annotate
   cluster/       orchestrator↔worker WebSocket (server, client, registry, messages)
   metrics.rs     custom OTEL + Sentry metrics
 migrations/      embedded; the single jobs table + job_status enum
@@ -423,6 +436,6 @@ migrations/      embedded; the single jobs table + job_status enum
 ## Tech
 
 Rust · [axum](https://github.com/tokio-rs/axum) · [diesel-async](https://github.com/weiznich/diesel_async) + Postgres ·
-[pgmq](https://github.com/Sagebati/pgmq) · [KataGo](https://github.com/lightvector/KataGo) ·
+[pgmq](https://github.com/Sagebati/pgmq) · [katago-rs](https://github.com/Sagebati/katago-rs) · [KataGo](https://github.com/lightvector/KataGo) ·
 OpenTelemetry · Sentry · [aide](https://github.com/tamasfe/aide) (OpenAPI) ·
 on the [`muxa`](https://github.com/Sagebati/muxa) framework.

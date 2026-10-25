@@ -1,6 +1,6 @@
 # One-command deploy: `docker compose up --build` (from this directory).
-# Brings up Postgres + the analyser. The image bundles a CPU KataGo + model,
-# so no GPU is required.
+# Brings up Postgres + the analyser. The default (cpu) image bundles katago-rs
+# on its CPU backend with the b10c128 net, so no GPU is required.
 name: katago-ws
 
 services:
@@ -20,7 +20,8 @@ services:
 
   app:
     build:
-      # Parent dir so the local muxa/pgmq path-deps are in the build context.
+      # Parent dir so the sibling muxa/pgmq/katago-rs checkouts are in the build
+      # context.
       context: ..
       dockerfile: katago-ws/Dockerfile
       # `runtime` is the Dockerfile's last (default) stage, so this is
@@ -30,15 +31,8 @@ services:
     environment:
       KATAGO_WS_DIESEL__URL: postgres://postgres:postgres@db:5432/goban
       RUST_LOG: info
-      # KataGo's official binary is an AppImage, which self-mounts via FUSE.
-      # The slim runtime container has no FUSE (/dev/fuse, fusermount), so the
-      # engine would exit instantly ("Cannot mount AppImage") and every job
-      # fails with "write to katago: Broken pipe". This makes the AppImage
-      # extract-and-run instead of mounting — the standard container fix.
-      APPIMAGE_EXTRACT_AND_RUN: "1"
       # Tune analysis strength/cost. Lowered to 10 so a full ~325-move game
-      # completes within the 600s engine timeout on this CPU build (100 visits
-      # times out). Raise (and bump KATAGO_WS_ENGINE__REQUEST_TIMEOUT_SECS) for
+      # completes well within the 600s engine timeout on the CPU backend. Raise (and bump KATAGO_WS_ENGINE__REQUEST_TIMEOUT_SECS) for
       # stronger analysis.
       KATAGO_WS_ENGINE__MAX_VISITS: "10"
       # KATAGO_WS_WORKER__CONCURRENCY: "2"
@@ -88,7 +82,6 @@ services:
   #     # No KATAGO_WS_DIESEL__URL — workers never reach Postgres; they only dial the
   #     # orchestrator's /cluster WebSocket (service name resolves on the compose network).
   #     KATAGO_WS_WORKER__ORCHESTRATOR_URL: "ws://orchestrator:3000/cluster"
-  #     APPIMAGE_EXTRACT_AND_RUN: "1"  # see the `app` service note
   #     KATAGO_WS_ENGINE__MAX_VISITS: "10"
   #     RUST_LOG: info
   #   depends_on:
