@@ -20,7 +20,7 @@ ARG RUNTIME_BASE=debian:bookworm-slim
 ARG RUNTIME_PKGS=ca-certificates
 # Optional extra apt repo for the runtime stage (AMD's ROCm repo): an
 # ASCII-armored signing key URL and the rest of a `deb` line.
-ARG RUNTIME_APT_KEY_URL=
+ARG RUNTIME_APT_GPG_URL=
 ARG RUNTIME_APT_REPO=
 # katago-rs's cargo features: one backend (flex, wgpu, rocm) and the nets.
 ARG ENGINE_FEATURES=flex,net-b10c128
@@ -75,7 +75,7 @@ ARG NET_B10_URL
 ARG NET_B18_URL
 ARG NET_HUMAN_URL
 ARG CONFIG_URL
-ARG RUNTIME_APT_KEY_URL
+ARG RUNTIME_APT_GPG_URL
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
@@ -94,8 +94,8 @@ RUN set -eu; mkdir -p /onnx /keyrings; \
     case ",${ENGINE_FEATURES}," in *,net-b18c384nbt-humanv0,*) convert b18c384nbt-humanv0 "${NET_HUMAN_URL}";; esac; \
     curl -fsSL -o /analysis.cfg "${CONFIG_URL}"; \
     sed -i 's#^logDir.*#logDir = /tmp/katago-logs#' /analysis.cfg; \
-    if [ -n "${RUNTIME_APT_KEY_URL}" ]; then \
-      curl -fsSL -o /keyrings/runtime-repo.asc "${RUNTIME_APT_KEY_URL}"; \
+    if [ -n "${RUNTIME_APT_GPG_URL}" ]; then \
+      curl -fsSL -o /keyrings/runtime-repo.asc "${RUNTIME_APT_GPG_URL}"; \
     fi
 
 ###############################################################################

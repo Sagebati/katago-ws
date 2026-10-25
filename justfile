@@ -46,7 +46,7 @@ rocm_version  := "7.2.3"
 rocm_base     := "ubuntu:24.04"
 rocm_key_url  := "https://repo.radeon.com/rocm/rocm.gpg.key"
 rocm_repo     := "https://repo.radeon.com/rocm/apt/" + rocm_version + " noble main"
-rocm_pkgs     := "ca-certificates libstdc++6 hip-runtime-amd"
+rocm_pkgs     := "ca-certificates libstdc++6 hip-runtime-amd rocm-device-libs"
 rocm_features := "rocm," + nets_gpu
 rocm_backend  := "rocm"
 rocm_fp16     := "true"
@@ -99,7 +99,7 @@ build variant base pkgs features backend fp16 model key_url="" repo="":
     DOCKER_BUILDKIT=1 docker build -f Dockerfile -t {{image}}:{{variant}} \
       --build-arg RUNTIME_BASE={{base}} \
       --build-arg RUNTIME_PKGS="{{pkgs}}" \
-      --build-arg RUNTIME_APT_KEY_URL="{{key_url}}" \
+      --build-arg RUNTIME_APT_GPG_URL="{{key_url}}" \
       --build-arg RUNTIME_APT_REPO="{{repo}}" \
       --build-arg ENGINE_FEATURES="{{features}}" \
       --build-arg ENGINE_BACKEND={{backend}} \
@@ -133,7 +133,7 @@ makefile:
     #!/usr/bin/env bash
     set -euo pipefail
     target() { # variant base pkgs features backend fp16 model key_url repo
-      printf '%s:\n\tDOCKER_BUILDKIT=1 docker build -f Dockerfile -t {{image}}:%s --build-arg RUNTIME_BASE=%s --build-arg RUNTIME_PKGS="%s" --build-arg RUNTIME_APT_KEY_URL="%s" --build-arg RUNTIME_APT_REPO="%s" --build-arg ENGINE_FEATURES="%s" --build-arg ENGINE_BACKEND=%s --build-arg ENGINE_FP16=%s --build-arg ENGINE_MODEL=%s {{ctx}}\n\n' \
+      printf '%s:\n\tDOCKER_BUILDKIT=1 docker build -f Dockerfile -t {{image}}:%s --build-arg RUNTIME_BASE=%s --build-arg RUNTIME_PKGS="%s" --build-arg RUNTIME_APT_GPG_URL="%s" --build-arg RUNTIME_APT_REPO="%s" --build-arg ENGINE_FEATURES="%s" --build-arg ENGINE_BACKEND=%s --build-arg ENGINE_FP16=%s --build-arg ENGINE_MODEL=%s {{ctx}}\n\n' \
         "$1" "$1" "$2" "$3" "$8" "$9" "$4" "$5" "$6" "$7"
     }
     {

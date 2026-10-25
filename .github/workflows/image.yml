@@ -116,7 +116,7 @@ jobs:
           build-args: |
             RUNTIME_BASE=${{ matrix.base }}
             RUNTIME_PKGS=${{ matrix.pkgs }}
-            RUNTIME_APT_KEY_URL=${{ matrix.key_url }}
+            RUNTIME_APT_GPG_URL=${{ matrix.key_url }}
             RUNTIME_APT_REPO=${{ matrix.repo }}
             ENGINE_FEATURES=${{ matrix.features }}
             ENGINE_BACKEND=${{ matrix.backend }}
