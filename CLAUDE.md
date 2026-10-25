@@ -290,9 +290,8 @@ float on `ref: main`, which is why this exists). Bumping `muxa` is a one-line
 change there, not a per-workflow edit. The `pgmq` sibling is still checked out and
 copied into the image build context, but nothing path-depends on it any more (see
 the git dep above); keep `PGMQ_REF` equal to that rev until the checkout is removed.
-katago-rs is a private repo: the action checks it out over SSH with the
-`KATAGO_RS_DEPLOY_KEY` secret (a read-only deploy key on `Sagebati/katago-rs`) when
-given one; `ci.yml` doesn't need it (nothing compiles against katago-rs; it is only a
+The action checks out katago-rs only with `katago-rs: true` (the image builds);
+`ci.yml` doesn't need it (nothing compiles against katago-rs; it is only a
 subprocess). Bump `KATAGO_RS_REF` to ship a new engine.
 
 **The per-variant image settings live only in the [`justfile`](justfile)**
