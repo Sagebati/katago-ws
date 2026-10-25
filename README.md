@@ -352,10 +352,8 @@ just all
 ```
 
 CI ([`.github/workflows/image.yml`](.github/workflows/image.yml)) builds + pushes
-all three to `ghcr.io/sagebati/katago-ws` on every push to `main` (`:latest` = CPU);
-katago-rs is a private repository, checked out with the `KATAGO_RS_DEPLOY_KEY`
-secret (a read-only deploy key on `Sagebati/katago-rs`) at the ref pinned in
-`.github/sibling-refs.env`. A host that can't build the Dockerfile (it needs the
+all three to `ghcr.io/sagebati/katago-ws` on every push to `main` (`:latest` = CPU),
+with katago-rs checked out at the ref pinned in `.github/sibling-refs.env`. A host that can't build the Dockerfile (it needs the
 sibling checkouts) just pulls the image.
 
 ## Releases
