@@ -362,17 +362,7 @@ impl KataGo {
     /// If KataGo exits on its own the engine stays down: every later query
     /// fails. (Short-lived engines — the auto-tuner's trials.)
     pub async fn spawn(cfg: &EngineConfig) -> AppResult<Arc<Self>> {
-        Self::launch(cfg, None, false)
-    }
-
-    /// [`spawn`](Self::spawn), additionally forwarding every stderr line to
-    /// `stderr_tap` (best effort: lines are dropped if the tap is full or gone).
-    /// The auto-tuner reads KataGo's startup log through this.
-    pub async fn spawn_with_stderr(
-        cfg: &EngineConfig,
-        stderr_tap: Option<mpsc::Sender<String>>,
-    ) -> AppResult<Arc<Self>> {
-        Self::launch(cfg, stderr_tap, false)
+        Self::launch(cfg, false)
     }
 
     /// [`spawn`](Self::spawn) for a long-lived engine: if KataGo exits on its
@@ -380,33 +370,13 @@ impl KataGo {
     /// process is relaunched (with backoff). Queries in flight at the crash
     /// fail; queries submitted while it is down wait for the relaunch.
     pub async fn spawn_supervised(cfg: &EngineConfig) -> AppResult<Arc<Self>> {
-        Self::launch(cfg, None, true)
+        Self::launch(cfg, true)
     }
 
-    fn launch(
-        cfg: &EngineConfig,
-        stderr_tap: Option<mpsc::Sender<String>>,
-        supervised: bool,
-    ) -> AppResult<Arc<Self>> {
-        let mut args = vec![
-            "analysis".to_owned(),
-            "-config".to_owned(),
-            cfg.config.clone(),
-            "-model".to_owned(),
-            cfg.model.clone(),
-        ];
-        if !cfg.human_model.is_empty() {
-            args.push("-human-model".to_owned());
-            args.push(cfg.human_model.clone());
-        }
-        if let Some(overrides) = cfg.katago_overrides() {
-            args.push("-override-config".to_owned());
-            args.push(overrides);
-        }
+    fn launch(cfg: &EngineConfig, supervised: bool) -> AppResult<Arc<Self>> {
         let launcher = Launcher {
             binary: cfg.binary.clone(),
-            args,
-            stderr_tap,
+            args: engine_args(cfg),
         };
         let process = launcher.launch()?;
 
@@ -454,7 +424,7 @@ impl KataGo {
             .clone();
         match seen {
             Status::Exited(report) => Err(AppError::ModelLoad(format!(
-                "KataGo exited during startup: {report}"
+                "the engine exited during startup: {report}"
             ))),
             Status::Ready | Status::Starting => Ok(()),
         }
@@ -542,10 +512,50 @@ impl KataGo {
 }
 
 /// Everything needed to (re)launch the subprocess.
+/// katago-rs's command line for `cfg`: KataGo's `analysis` arguments, plus its
+/// `-backend`.
+fn engine_args(cfg: &EngineConfig) -> Vec<String> {
+    let mut args = vec![
+        "analysis".to_owned(),
+        "-backend".to_owned(),
+        cfg.backend.as_arg().to_owned(),
+        "-config".to_owned(),
+        cfg.config.clone(),
+        "-model".to_owned(),
+        cfg.model.clone(),
+    ];
+    if !cfg.human_model.is_empty() {
+        args.push("-human-model".to_owned());
+        args.push(cfg.human_model.clone());
+    }
+    if let Some(overrides) = cfg.katago_overrides() {
+        args.push("-override-config".to_owned());
+        args.push(overrides);
+    }
+    args
+}
+
+/// The analysis-engine version `binary` follows (`KataGo v1.16.5` from
+/// `<binary> version` is `1.16.5`), or `None` when it can't be read.
+pub async fn engine_version(binary: &str) -> Option<String> {
+    let out = tokio::process::Command::new(binary)
+        .arg("version")
+        .output()
+        .await
+        .ok()?;
+    parse_version(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn parse_version(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix("KataGo v"))
+        .map(|version| version.trim().to_owned())
+        .filter(|version| !version.is_empty())
+}
+
 struct Launcher {
     binary: String,
     args: Vec<String>,
-    stderr_tap: Option<mpsc::Sender<String>>,
 }
 
 impl Launcher {
@@ -560,7 +570,7 @@ impl Launcher {
             .spawn()
             .map_err(|err| {
                 AppError::ModelLoad(format!(
-                    "failed to launch '{} analysis': {err} (is KataGo installed?)",
+                    "failed to launch '{} analysis': {err} (is katago-rs installed?)",
                     self.binary
                 ))
             })?;
@@ -587,7 +597,6 @@ impl Launcher {
 
         // Surface KataGo's stderr (startup diagnostics, tuning, errors), spot
         // the ready announcement, and keep the last lines for the exit report.
-        let stderr_tap = self.stderr_tap.clone();
         tokio::spawn(async move {
             let mut ready_tx = Some(ready_tx);
             let mut recent = VecDeque::with_capacity(STDERR_TAIL_LINES);
@@ -598,9 +607,6 @@ impl Launcher {
                     && let Some(tx) = ready_tx.take()
                 {
                     let _ = tx.send(());
-                }
-                if let Some(tap) = &stderr_tap {
-                    let _ = tap.try_send(line.clone());
                 }
                 if recent.len() == STDERR_TAIL_LINES {
                     recent.pop_front();
@@ -716,11 +722,11 @@ impl Owner {
                 Served::Exited(report) => report,
             };
             if !self.supervised || !self.started {
-                tracing::warn!(target: "katago", status = %report.status, stderr = %report.stderr.join("\n"), "KataGo exited");
+                tracing::warn!(target: "katago", status = %report.status, stderr = %report.stderr.join("\n"), "engine exited");
                 self.status.send_replace(Status::Exited(report.to_string()));
                 return;
             }
-            tracing::error!(target: "katago", status = %report.status, stderr = %report.stderr.join("\n"), "KataGo exited unexpectedly; relaunching");
+            tracing::error!(target: "katago", status = %report.status, stderr = %report.stderr.join("\n"), "engine exited unexpectedly; relaunching");
             // A crash after a healthy start relaunches promptly; one that
             // never got going backs off further each time.
             if matches!(*self.status.borrow(), Status::Ready) {
@@ -940,6 +946,43 @@ fn handle_line(pending: &mut HashMap<String, Pending>, line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_command_line_names_the_backend_after_the_subcommand() {
+        let cfg = EngineConfig {
+            backend: crate::config::EngineBackend::Rocm,
+            config: "a.cfg".to_owned(),
+            model: "/nets/kata1-b18c384nbt.bpk".to_owned(),
+            human_model: "/nets/b18c384nbt-humanv0.bpk".to_owned(),
+            analysis_threads: 256,
+            fp16: true,
+            ..EngineConfig::default()
+        };
+        assert_eq!(
+            engine_args(&cfg),
+            [
+                "analysis",
+                "-backend",
+                "rocm",
+                "-config",
+                "a.cfg",
+                "-model",
+                "/nets/kata1-b18c384nbt.bpk",
+                "-human-model",
+                "/nets/b18c384nbt-humanv0.bpk",
+                "-override-config",
+                "numAnalysisThreads=256,numSearchThreadsPerAnalysisThread=1,burnUseFP16=true",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_version_is_read_from_the_version_subcommand() {
+        let out =
+            "KataGo v1.16.5\nGit revision: ba938676\nUsing burn backend (katago-rs: wgpu, rocm)\n";
+        assert_eq!(parse_version(out).as_deref(), Some("1.16.5"));
+        assert_eq!(parse_version("garbage\n"), None);
+    }
 
     fn root(winrate: f32, score_lead: f32, current_player: Option<Color>) -> RootInfo {
         RootInfo {

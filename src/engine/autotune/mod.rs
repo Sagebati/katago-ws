@@ -1,48 +1,38 @@
-//! Startup throughput auto-tune for KataGo's analysis engine.
+//! Startup throughput auto-tune for the analysis engine (katago-rs).
 //!
-//! KataGo's own `benchmark`/`genconfig` only tune GTP's `numSearchThreads`; for
-//! the analysis engine, throughput at a fixed `max_visits` is decided by
-//! settings they don't touch, and the best values depend on the GPU, the
-//! driver *and* the KataGo build:
+//! Throughput at a fixed `max_visits` is decided by a few startup settings
+//! whose best values depend on the GPU, its driver and the backend (`rocm`,
+//! `wgpu`), so they are measured, not hardcoded:
 //!
-//! - `numNNServerThreadsPerModel` × `nnMaxBatchSize` — the biggest lever. Stock
-//!   OpenCL KataGo shares one in-order command queue across server threads, so
-//!   4×64 wins and 8×32 is slower; a build with a queue per server thread
-//!   (`patches/`) is fastest at 8×32. So these are measured, not hardcoded.
+//! - `numNNServerThreadsPerModel` × `nnMaxBatchSize` — the biggest lever.
+//!   katago-rs's NN server threads are tasks on its one search thread, each
+//!   with a batch in flight: on ROCm (RX 6800 XT) 8×64 kept the GPU busiest.
 //! - `numAnalysisThreads` — positions searched in parallel (256 is the usual
 //!   sweet spot; 128 is tried, and 512 when the queue is deep enough to feed
 //!   it, i.e. with three or more games in flight).
 //! - `numSearchThreadsPerAnalysisThread` — always 1: best throughput, and equal
 //!   or better quality, for whole-game analysis.
-//! - the OpenCL device — when one GPU is exposed by both a vendor platform
-//!   (AMD ROCm "AMD Accelerated Parallel Processing", NVIDIA CUDA, Intel) and a
-//!   Mesa one (rusticl, Clover), KataGo may pick Mesa's, which is ~1.6× slower
-//!   on AMD. The device list is read from KataGo's own startup log and the
-//!   vendor device preferred; this is not trialled (each device would pay its
-//!   own first-use kernel tuning).
 //!
-//! Each candidate is a fresh KataGo process (these are startup settings) fed
+//! Each candidate is a fresh engine process (these are startup settings) fed
 //! an embedded 17-game corpus in 16-turn queries that keep the queue as deep as
 //! `[worker].concurrency` games in flight would (≈ 230 positions each) —
 //! without a finishing game's drain, which makes whole-game measurements
 //! noisy. Throughput is read off a turn-level counter after one wave of
-//! warm-up, so neither process startup nor KataGo's first-use OpenCL kernel
-//! tuning is charged to a candidate. Clearly losing candidates are stopped
+//! warm-up, so neither process startup nor the first-use GPU kernel
+//! compilation is charged to a candidate. Clearly losing candidates are stopped
 //! half-way, near-ties are re-measured, and within 2% the higher-prior
 //! candidate wins. The winning keys are cached (see [`cache`]) so later starts
-//! skip all of this.
+//! skip all of this. The CPU backend (`flex`) is not tuned.
 //!
 //! Precedence: settings given **explicitly** are pinned — `[engine]`'s
 //! `analysis_threads` / `search_threads_per_analysis` / `nn_server_threads` /
 //! `nn_max_batch_size` when present in the config file or env (their built-in
 //! defaults don't count), and any key in `[engine] override_config`. The tuner
 //! never changes them and only searches (and fills in) the rest, writing its
-//! choices back into those `[engine]` fields (the device keys go to
-//! `override_config`). Any failure falls back to the configuration as given;
-//! the auto-tune never fails startup.
+//! choices back into those `[engine]` fields. Any failure falls back to the
+//! configuration as given; the auto-tune never fails startup.
 
 pub mod cache;
-pub mod device;
 pub mod fast;
 pub mod hw;
 pub mod overrides;
@@ -56,21 +46,20 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt as _;
 use futures_util::stream::FuturesUnordered;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 
 use crate::config::{AutotuneMode, EngineConfig};
 use crate::engine::AnalysisEngine;
 use crate::engine::sgf::{self, ParsedGame};
 
 use self::cache::{CacheEntry, CacheKey, TrialRecord};
-use self::device::OpenClDevice;
 use self::hw::Hardware;
 use self::overrides::Overrides;
 use self::search::{Candidate, Outcome};
 
 /// The embedded trial corpus: 17 public 19×19 games (the ear-reddening game
 /// and 16 OGS games, ~3,900 positions) — enough that a trial never wraps
-/// around into KataGo's NN cache.
+/// around into the engine's NN cache.
 const CORPUS: [&str; 17] = [
     include_str!("corpus/ear_reddening.sgf"),
     include_str!("corpus/ogs-60000000.sgf"),
@@ -91,7 +80,7 @@ const CORPUS: [&str; 17] = [
     include_str!("corpus/ogs-60586006.sgf"),
 ];
 
-/// Turns per query. Feeding games in small chunks keeps KataGo's queue at a
+/// Turns per query. Feeding games in small chunks keeps the engine's queue at a
 /// constant depth, without the dips a whole game's tail leaves — which make
 /// short measurements noisy.
 const CHUNK_TURNS: usize = 16;
@@ -109,15 +98,11 @@ const MAX_WINDOW: Duration = Duration::from_secs(12);
 /// Fast mode: after the first two trials, another one starts only if it
 /// should finish within this much time since tuning began.
 const FAST_BUDGET: Duration = Duration::from_secs(25);
-/// A first KataGo start slower than this is paying for one-off OpenCL kernel
-/// tuning; the excess isn't charged to the fast mode's budget.
+/// A first engine start slower than this is paying for one-off GPU kernel
+/// compilation; the excess isn't charged to the fast mode's budget.
 const SLOW_START: Duration = Duration::from_secs(15);
-/// How long the device probe waits for KataGo to list its OpenCL devices.
-const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
-/// `katago version` should answer at once (an `AppImage` extracts first).
-const VERSION_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// `[engine]` fields the tuner sets, with the KataGo key each one becomes.
+/// `[engine]` fields the tuner sets, with the config key each one becomes.
 pub const TUNING_FIELDS: [(&str, &str); 4] = [
     ("analysis_threads", overrides::ANALYSIS_THREADS),
     ("search_threads_per_analysis", overrides::SEARCH_THREADS),
@@ -156,7 +141,7 @@ pub async fn apply(
     ]
     .iter()
     .all(|key| pinned.get(key).is_some());
-    if pins_all && pinned.pins_opencl_device() {
+    if pins_all {
         tracing::info!("autotune: every tuned key is set explicitly; skipped");
         return cfg;
     }
@@ -180,8 +165,8 @@ pub async fn apply(
         mode = ?cfg.autotune_mode,
         budget_secs = budget.as_secs(),
         concurrency,
-        "autotune: no cached result for this GPU/binary/model; tuning KataGo throughput \
-         (first run on a new GPU or model also tunes OpenCL kernels)"
+        "autotune: no cached result for this GPU/binary/model; tuning engine throughput \
+         (a first run on a new GPU also compiles its kernels)"
     );
     match tokio::time::timeout(budget, tune(&cfg, &pinned, concurrency)).await {
         Ok(Ok(Tuned::Skipped(why))) => {
@@ -218,13 +203,13 @@ pub async fn apply(
             with_tuned(cfg, explicit, &tuned)
         }
         Ok(Err(err)) => {
-            tracing::warn!("autotune: failed ({err}); using the KataGo config as given");
+            tracing::warn!("autotune: failed ({err}); using the engine config as given");
             cfg
         }
         Err(_) => {
             tracing::warn!(
                 budget_secs = budget.as_secs(),
-                "autotune: timed out; using the KataGo config as given"
+                "autotune: timed out; using the engine config as given"
             );
             cfg
         }
@@ -269,7 +254,7 @@ fn field_mut<'cfg>(cfg: &'cfg mut EngineConfig, key: &str) -> Option<&'cfg mut u
 }
 
 /// `cfg` with the tuned keys applied: the throughput keys into their
-/// `[engine]` fields, the rest (OpenCL device) appended to `override_config`.
+/// `[engine]` fields, any other key appended to `override_config`.
 /// A field neither explicit nor tuned but pinned through `override_config` is
 /// zeroed, so its built-in default isn't emitted alongside the pin.
 fn with_tuned(mut cfg: EngineConfig, explicit: &[&str], tuned: &Overrides) -> EngineConfig {
@@ -322,22 +307,16 @@ enum Tuned {
 }
 
 async fn tune(cfg: &EngineConfig, pinned: &Overrides, concurrency: usize) -> Result<Tuned, String> {
-    let backend = katago_backend(&cfg.binary).await?;
-    tracing::info!(%backend, "autotune: KataGo backend");
-    if backend.to_ascii_lowercase().contains("eigen") {
-        return Ok(Tuned::Skipped(format!(
-            "{backend} backend: CPU inference, these settings are GPU knobs"
-        )));
+    let backend = cfg.backend;
+    tracing::info!(backend = backend.as_arg(), "autotune: engine backend");
+    if !backend.is_gpu() {
+        return Ok(Tuned::Skipped(
+            "flex backend: CPU inference, these settings are GPU knobs".to_owned(),
+        ));
     }
 
-    let opencl = backend.eq_ignore_ascii_case("opencl");
     let depth = concurrency * POSITIONS_PER_GAME;
     let clock = Instant::now();
-    let device = if opencl && !pinned.pins_opencl_device() {
-        choose_opencl_device(cfg, pinned).await?
-    } else {
-        None
-    };
 
     // Trial timing for the fast mode's budget (single task: plain Cells).
     let forgiven: Cell<Option<Duration>> = Cell::new(None);
@@ -345,13 +324,14 @@ async fn tune(cfg: &EngineConfig, pinned: &Overrides, concurrency: usize) -> Res
     let (forgiven, last) = (&forgiven, &last);
     let trial = move |cand: Candidate, prune_below: Option<f64>| async move {
         // The first wave (all threads start together) is warm-up, as is
-        // startup; KataGo's first-use kernel tuning happens before either.
+        // startup; the engine's first-use kernel compilation happens before
+        // either.
         let warmup = cand
             .analysis_threads
             .or_else(|| pinned.get(overrides::ANALYSIS_THREADS)?.parse().ok())
             .map_or(256, u64::from)
             .min(u64::try_from(depth).unwrap_or(u64::MAX));
-        let over = trial_overrides(pinned, cand, device);
+        let over = trial_overrides(pinned, cand);
         let started = Instant::now();
         let (outcome, startup) = run_trial(cfg, &over, concurrency, warmup, prune_below).await;
         let mut wall = started.elapsed();
@@ -379,11 +359,11 @@ async fn tune(cfg: &EngineConfig, pinned: &Overrides, concurrency: usize) -> Res
 
     let report = match cfg.autotune_mode {
         AutotuneMode::Thorough => {
-            thorough::run(&thorough::Space::new(pinned, depth, opencl), trial).await
+            thorough::run(&thorough::Space::new(pinned, depth, backend), trial).await
         }
         AutotuneMode::Fast => {
             let hw = Hardware::probe().await;
-            let space = fast::Space::new(pinned, depth, opencl, hw);
+            let space = fast::Space::new(pinned, depth, backend, hw);
             tracing::info!(
                 cpus = hw.cpus,
                 gpu_lanes = ?hw.gpu_lanes,
@@ -407,14 +387,14 @@ async fn tune(cfg: &EngineConfig, pinned: &Overrides, concurrency: usize) -> Res
         .collect();
     let (best, rate) = report.best.ok_or("every trial failed")?;
     Ok(Tuned::Done {
-        tuned: tuned_keys(pinned, best, device),
+        tuned: tuned_keys(pinned, best),
         rate,
         trials,
     })
 }
 
-/// The keys the tuner sets for `cand` (and `device`), minus any pinned ones.
-fn tuned_keys(pinned: &Overrides, cand: Candidate, device: Option<usize>) -> Overrides {
+/// The keys the tuner sets for `cand`, minus any pinned ones.
+fn tuned_keys(pinned: &Overrides, cand: Candidate) -> Overrides {
     let mut keys = Overrides::default();
     if pinned.get(overrides::SEARCH_THREADS).is_none() {
         keys.set(overrides::SEARCH_THREADS, "1");
@@ -428,110 +408,19 @@ fn tuned_keys(pinned: &Overrides, cand: Candidate, device: Option<usize>) -> Ove
     if let Some(batch) = cand.batch {
         keys.set(overrides::BATCH_SIZE, &batch.to_string());
     }
-    if let Some(index) = device {
-        // Every server thread, or KataGo picks its own device for the rest.
-        let servers = cand
-            .servers
-            .or_else(|| pinned.get(overrides::SERVER_THREADS)?.parse().ok())
-            .unwrap_or(1);
-        for thread in 0..servers {
-            keys.set(
-                &format!("openclDeviceToUseThread{thread}"),
-                &index.to_string(),
-            );
-        }
-    }
     keys.retain(|key| pinned.get(key).is_none());
     keys
 }
 
 /// The full `-override-config` a trial runs with: the pinned keys plus the
 /// candidate's.
-fn trial_overrides(pinned: &Overrides, cand: Candidate, device: Option<usize>) -> Overrides {
+fn trial_overrides(pinned: &Overrides, cand: Candidate) -> Overrides {
     let mut over = pinned.clone();
-    over.fill(&tuned_keys(pinned, cand, device));
+    over.fill(&tuned_keys(pinned, cand));
     over
 }
 
-/// Which backend the binary was built with (`OpenCL`, `CUDA`, `Eigen`, …),
-/// from `katago version`.
-async fn katago_backend(binary: &str) -> Result<String, String> {
-    let output = tokio::time::timeout(
-        VERSION_TIMEOUT,
-        tokio::process::Command::new(binary)
-            .arg("version")
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_elapsed| format!("'{binary} version' timed out"))?
-    .map_err(|err| format!("'{binary} version': {err}"))?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    search::parse_backend(&text)
-        .map(str::to_owned)
-        .ok_or_else(|| format!("no backend in '{binary} version' output: {}", text.trim()))
-}
-
-/// Start KataGo just long enough to read its OpenCL device list, then pick
-/// the device to pin (see [`device::choose`]).
-async fn choose_opencl_device(
-    cfg: &EngineConfig,
-    pinned: &Overrides,
-) -> Result<Option<usize>, String> {
-    let mut over = pinned.clone();
-    over.set("logToStderr", "true");
-    let probe_cfg = launch_cfg(cfg, &over);
-    let (tap_tx, mut tap_rx) = mpsc::channel::<String>(256);
-    let engine = AnalysisEngine::spawn_with_stderr(probe_cfg, Some(tap_tx))
-        .await
-        .map_err(|err| format!("device probe: {err}"))?;
-
-    let mut log = Vec::new();
-    let read = async {
-        while let Some(line) = tap_rx.recv().await {
-            let done = device::ends_device_listing(&line);
-            log.push(line);
-            if done {
-                break;
-            }
-        }
-    };
-    let timed_out = tokio::time::timeout(PROBE_TIMEOUT, read).await.is_err();
-    engine.shutdown().await;
-
-    let listing = device::parse(log.iter().map(String::as_str));
-    if listing.devices.is_empty() {
-        return Err(if timed_out {
-            "device probe: KataGo listed no OpenCL device in time".to_owned()
-        } else {
-            "device probe: KataGo exited without listing an OpenCL device".to_owned()
-        });
-    }
-    for dev in &listing.devices {
-        tracing::info!(
-            index = dev.index,
-            platform = %dev.platform,
-            score = ?dev.score,
-            "autotune: found OpenCL device {}",
-            dev.name
-        );
-    }
-    let choice = device::choose(&listing);
-    match choice.and_then(|index| listing.devices.iter().find(|dev| dev.index == index)) {
-        Some(OpenClDevice {
-            index,
-            name,
-            platform,
-            ..
-        }) => {
-            tracing::info!(index, %platform, "autotune: pinning OpenCL device {name}");
-        }
-        None => tracing::info!("autotune: leaving the OpenCL device choice to KataGo"),
-    }
-    Ok(choice)
-}
-
-/// One candidate: a fresh KataGo with `over`, fed the corpus, measured.
+/// One candidate: a fresh engine with `over`, fed the corpus, measured.
 async fn run_trial(
     cfg: &EngineConfig,
     over: &Overrides,
@@ -682,24 +571,13 @@ mod tests {
     }
 
     #[test]
-    fn tuned_keys_cover_every_server_thread_with_the_device() {
-        let keys = tuned_keys(
-            &Overrides::default(),
-            cand(Some(256), Some(4), Some(64)),
-            Some(0),
-        );
+    fn tuned_keys_are_the_candidate_with_one_search_thread() {
+        let keys = tuned_keys(&Overrides::default(), cand(Some(256), Some(8), Some(64)));
         assert_eq!(
             keys.to_string(),
             "numSearchThreadsPerAnalysisThread=1,numAnalysisThreads=256,\
-             numNNServerThreadsPerModel=4,nnMaxBatchSize=64,openclDeviceToUseThread0=0,\
-             openclDeviceToUseThread1=0,openclDeviceToUseThread2=0,openclDeviceToUseThread3=0"
+             numNNServerThreadsPerModel=8,nnMaxBatchSize=64"
         );
-        let no_device = tuned_keys(
-            &Overrides::default(),
-            cand(Some(128), Some(8), Some(32)),
-            None,
-        );
-        assert!(!no_device.pins_opencl_device());
     }
 
     #[test]
@@ -741,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn tuned_values_land_in_the_engine_fields_and_devices_in_the_override() {
+    fn tuned_values_land_in_the_engine_fields() {
         let cfg = EngineConfig {
             analysis_threads: 12,
             search_threads_per_analysis: 1,
@@ -752,11 +630,10 @@ mod tests {
         };
         let explicit = ["nn_server_threads"];
         let pinned = pins(&cfg, &explicit);
-        let tuned = tuned_keys(&pinned, cand(Some(256), None, None), Some(1));
+        let tuned = tuned_keys(&pinned, cand(Some(256), None, None));
         assert_eq!(
             tuned.to_string(),
-            "numSearchThreadsPerAnalysisThread=1,numAnalysisThreads=256,\
-             openclDeviceToUseThread0=1,openclDeviceToUseThread1=1"
+            "numSearchThreadsPerAnalysisThread=1,numAnalysisThreads=256"
         );
         let out = with_tuned(cfg, &explicit, &tuned);
         assert_eq!(out.analysis_threads, 256);
@@ -767,8 +644,7 @@ mod tests {
             out.katago_overrides().as_deref(),
             Some(
                 "numAnalysisThreads=256,numSearchThreadsPerAnalysisThread=1,\
-                 numNNServerThreadsPerModel=2,nnMaxBatchSize=48,\
-                 openclDeviceToUseThread0=1,openclDeviceToUseThread1=1"
+                 numNNServerThreadsPerModel=2,nnMaxBatchSize=48"
             )
         );
     }
@@ -783,7 +659,7 @@ mod tests {
             ..EngineConfig::default()
         };
         let pinned = pins(&cfg, &[]);
-        let tuned = tuned_keys(&pinned, cand(None, Some(8), Some(32)), None);
+        let tuned = tuned_keys(&pinned, cand(None, Some(8), Some(32)));
         let out = with_tuned(cfg, &[], &tuned);
         assert_eq!(out.analysis_threads, 0);
         let overrides = out.katago_overrides().unwrap_or_default();
@@ -798,11 +674,7 @@ mod tests {
     #[test]
     fn trials_launch_with_exactly_the_trial_overrides() {
         let cfg = EngineConfig::default();
-        let over = trial_overrides(
-            &Overrides::default(),
-            cand(Some(256), Some(8), Some(32)),
-            None,
-        );
+        let over = trial_overrides(&Overrides::default(), cand(Some(256), Some(8), Some(32)));
         let launch = launch_cfg(&cfg, &over);
         assert_eq!(
             launch.katago_overrides().as_deref(),

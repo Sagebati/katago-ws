@@ -1,4 +1,4 @@
-//! Analysis engine: parse SGF → drive KataGo → annotate. The muxa plugin
+//! Analysis engine: parse SGF → drive katago-rs (KataGo's analysis protocol) → annotate. The muxa plugin
 //! spawns the engine and shares it as `Arc<AnalysisEngine>` on the app state.
 
 pub mod annotate;
@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use muxa::Sections;
 use muxa::prelude::*;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use tracing::Instrument as _;
 
 use crate::config::{EngineConfig, WorkerConfig};
@@ -21,33 +21,35 @@ use crate::engine::katago::{KataGo, TurnResponse};
 use crate::engine::sgf::ParsedGame;
 use crate::error::AppResult;
 
-/// Owns the KataGo client and turns an SGF into a [`GameAnalysis`].
+/// Owns the engine client and turns an SGF into a [`GameAnalysis`].
 pub struct AnalysisEngine {
     katago: Arc<KataGo>,
     cfg: EngineConfig,
+    /// The engine's version (`<binary> version`), recorded in every payload.
+    version: Option<String>,
 }
 
 impl AnalysisEngine {
     /// Spawn the KataGo analysis engine subprocess.
     pub async fn spawn(cfg: EngineConfig) -> AppResult<Self> {
         let katago = KataGo::spawn(&cfg).await?;
-        Ok(Self { katago, cfg })
+        Ok(Self::new(katago, cfg).await)
     }
 
-    /// [`spawn`](Self::spawn), also forwarding KataGo's stderr lines to `tap`.
-    pub async fn spawn_with_stderr(
-        cfg: EngineConfig,
-        tap: Option<mpsc::Sender<String>>,
-    ) -> AppResult<Self> {
-        let katago = KataGo::spawn_with_stderr(&cfg, tap).await?;
-        Ok(Self { katago, cfg })
+    async fn new(katago: Arc<KataGo>, cfg: EngineConfig) -> Self {
+        let version = katago::engine_version(&cfg.binary).await;
+        Self {
+            katago,
+            cfg,
+            version,
+        }
     }
 
     /// [`spawn`](Self::spawn) for the long-lived service engine: KataGo is
     /// relaunched if it exits (see [`KataGo::spawn_supervised`]).
     pub async fn spawn_supervised(cfg: EngineConfig) -> AppResult<Self> {
         let katago = KataGo::spawn_supervised(&cfg).await?;
-        Ok(Self { katago, cfg })
+        Ok(Self::new(katago, cfg).await)
     }
 
     /// Wait until KataGo has loaded its model and accepts queries.
@@ -152,7 +154,9 @@ impl AnalysisEngine {
             )
             .await?
         };
-        Ok(annotate::assemble(&game, turns, &self.cfg, human_profile))
+        let mut analysis = annotate::assemble(&game, turns, &self.cfg, human_profile);
+        analysis.engine.version.clone_from(&self.version);
+        Ok(analysis)
     }
 
     /// One KataGo query over `turns`, traced and counted as `pass`.
@@ -294,7 +298,7 @@ impl<S: State> Plugin<S> for AutotunePlugin {
         let cfg = setup.tuned(self.force).await;
         tracing::info!(
             overrides = cfg.katago_overrides().as_deref().unwrap_or("none"),
-            "autotune: KataGo will start with"
+            "autotune: the engine will start with"
         );
         Ok(())
     }
@@ -318,12 +322,13 @@ impl<S: State> Plugin<S> for KataGoEnginePlugin {
         let cfg = setup.tuned(false).await;
         tracing::info!(
             binary = %cfg.binary,
+            backend = cfg.backend.as_arg(),
             model = %cfg.model,
             max_visits = cfg.max_visits,
             human_model = (!cfg.human_model.is_empty()).then_some(cfg.human_model.as_str()),
             screen_visits = cfg.two_pass().then_some(cfg.screen_visits),
             overrides = cfg.katago_overrides().as_deref().unwrap_or("none"),
-            "launching KataGo analysis engine"
+            "launching the katago-rs analysis engine"
         );
         let engine = AnalysisEngine::spawn_supervised(cfg)
             .await
@@ -331,7 +336,7 @@ impl<S: State> Plugin<S> for KataGoEnginePlugin {
         // Fail startup here, with KataGo's own reason, rather than come up
         // "ready" and fail every job.
         engine.wait_ready().await.map_err(Error::other)?;
-        tracing::info!("KataGo analysis engine ready");
+        tracing::info!("katago-rs analysis engine ready");
         Ok(Arc::new(engine))
     }
 }
