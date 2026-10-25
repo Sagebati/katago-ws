@@ -201,7 +201,8 @@ pub struct EngineInfo {
     pub ownership_stdev: bool,
     /// Whether `policy` grids are present.
     pub policy: bool,
-    /// The human SL network behind `human_policy`, when there is one.
+    /// The human SL network behind `human_policy`, when there is one: its
+    /// name, as `model` (`b18c384nbt-humanv0`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub human_model: Option<String>,
     /// Visits of the screening pass, when two-pass analysis ran: positions
@@ -752,7 +753,7 @@ pub fn assemble(
             ownership: !ownership.is_empty(),
             ownership_stdev: !ownership_stdev.is_empty(),
             policy: !policy.is_empty(),
-            human_model: human_profile.as_ref().map(|_| cfg.human_model.clone()),
+            human_model: human_profile.as_ref().map(|_| net_name(&cfg.human_model)),
             screen_visits: cfg.two_pass().then_some(cfg.screen_visits),
         },
         ownership,
@@ -799,7 +800,7 @@ mod tests {
             top_k,
             max_visits: 100,
             model: "test-model".to_owned(),
-            human_model: "test-model-human".to_owned(),
+            human_model: "/opt/katago-rs/nets/test-model-human.bpk".to_owned(),
             ..EngineConfig::default()
         }
     }
