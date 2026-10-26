@@ -126,7 +126,7 @@ impl Space {
             };
         let want = match backend {
             EngineBackend::Rocm => ROCM_PRIOR,
-            EngineBackend::Wgpu | EngineBackend::Flex => WGPU_PRIOR,
+            EngineBackend::Wgpu | EngineBackend::Flex | EngineBackend::Upstream => WGPU_PRIOR,
         };
         // The prior, or the closest rung below it that survived the filters.
         let prior = ladder

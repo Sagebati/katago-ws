@@ -513,17 +513,19 @@ impl KataGo {
 
 /// Everything needed to (re)launch the subprocess.
 /// katago-rs's command line for `cfg`: KataGo's `analysis` arguments, plus its
-/// `-backend`.
+/// `-backend` (none for stock KataGo, `upstream`).
 fn engine_args(cfg: &EngineConfig) -> Vec<String> {
-    let mut args = vec![
-        "analysis".to_owned(),
-        "-backend".to_owned(),
-        cfg.backend.as_arg().to_owned(),
+    let mut args = vec!["analysis".to_owned()];
+    if cfg.backend.is_katago_rs() {
+        args.push("-backend".to_owned());
+        args.push(cfg.backend.as_arg().to_owned());
+    }
+    args.extend([
         "-config".to_owned(),
         cfg.config.clone(),
         "-model".to_owned(),
         cfg.model.clone(),
-    ];
+    ]);
     if !cfg.human_model.is_empty() {
         args.push("-human-model".to_owned());
         args.push(cfg.human_model.clone());
@@ -972,6 +974,30 @@ mod tests {
                 "/nets/b18c384nbt-humanv0.bpk",
                 "-override-config",
                 "numAnalysisThreads=256,numSearchThreadsPerAnalysisThread=1,burnUseFP16=true",
+            ]
+        );
+    }
+
+    #[test]
+    fn stock_katago_gets_neither_backend_nor_burn_fp16() {
+        let cfg = EngineConfig {
+            backend: crate::config::EngineBackend::Upstream,
+            config: "a.cfg".to_owned(),
+            model: "/nets/kata1-b18c384nbt.bin.gz".to_owned(),
+            analysis_threads: 8,
+            fp16: true,
+            ..EngineConfig::default()
+        };
+        assert_eq!(
+            engine_args(&cfg),
+            [
+                "analysis",
+                "-config",
+                "a.cfg",
+                "-model",
+                "/nets/kata1-b18c384nbt.bin.gz",
+                "-override-config",
+                "numAnalysisThreads=8,numSearchThreadsPerAnalysisThread=1",
             ]
         );
     }
