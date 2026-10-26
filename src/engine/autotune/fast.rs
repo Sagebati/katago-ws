@@ -15,6 +15,12 @@
 //!   8, 16 server threads) starting from the backend's usual winner, climbing
 //!   while it improves.
 //!
+//! - **Each server's batch cap** (`nnMaxBatchSize`) is its share of the total but
+//!   at least [`HEADROOM_BATCH`] (and at most the total): the servers drain one
+//!   queue unevenly, so a cap at exactly the share leaves positions waiting
+//!   (ROCm, b18c384nbt: 8 servers x 64 did 13.3 positions/s, 8 x 32 13.0; the
+//!   thorough search finds 8 x 64 on ROCm and 4 x 64 on Vulkan).
+//!
 //! Trials are expensive (an engine restart each), so beyond the first two the
 //! search stops as soon as the next trial wouldn't fit the time budget,
 //! trusting the prior.
@@ -32,6 +38,15 @@ const SERVER_LADDER: [u32; 5] = [1, 2, 4, 8, 16];
 
 /// Batches below this are too small to be worth a server thread.
 const MIN_BATCH: u32 = 8;
+
+/// The smallest batch cap a server thread gets (module docs).
+const HEADROOM_BATCH: u32 = 64;
+
+/// `nnMaxBatchSize` for `servers` server threads sharing `total` positions in flight: the share, at least
+/// [`HEADROOM_BATCH`], at most `total`.
+fn batch_cap(total: u32, servers: u32) -> u32 {
+    (total / servers).max(HEADROOM_BATCH.min(total)).max(1)
+}
 
 /// Usual winners: ROCm → 8 server threads (measured), wgpu → 4 (not yet).
 const ROCM_PRIOR: u32 = 8;
@@ -91,7 +106,7 @@ impl Space {
                         None,
                         servers
                             .filter(|&srv| srv > 0)
-                            .map(|srv| (total / srv).max(1)),
+                            .map(|srv| batch_cap(total, srv)),
                     )]
                 }
                 (None, Some(batch)) => {
@@ -106,7 +121,7 @@ impl Space {
                     .iter()
                     .copied()
                     .filter(|&srv| srv == 1 || total / srv >= MIN_BATCH)
-                    .map(|srv| (Some(srv), Some(total / srv)))
+                    .map(|srv| (Some(srv), Some(batch_cap(total, srv))))
                     .collect(),
             };
         let want = match backend {
@@ -306,11 +321,11 @@ mod tests {
         let space = Space::new(&full(), 460, EngineBackend::Wgpu, RX6800XT);
         let report = search_with(&space, &rates, 9);
         assert_eq!(tried(&report), vec![4, 8, 16]);
-        assert_eq!(picked(&report), (Some(8), Some(32)));
+        assert_eq!(picked(&report), (Some(8), Some(64)));
         // Out of budget after two trials, the winner so far stands.
         let report = search_with(&space, &rates, 2);
         assert_eq!(tried(&report), vec![4, 8]);
-        assert_eq!(picked(&report), (Some(8), Some(32)));
+        assert_eq!(picked(&report), (Some(8), Some(64)));
     }
 
     /// katago-rs on ROCm: starts at 8 server threads, which wins.
@@ -319,7 +334,7 @@ mod tests {
         let rates = HashMap::from([(2, 9.0), (4, 12.3), (8, 13.4), (16, 12.5)]);
         let space = Space::new(&full(), 460, EngineBackend::Rocm, RX6800XT);
         let report = search_with(&space, &rates, 2);
-        assert_eq!(picked(&report), (Some(8), Some(32)));
+        assert_eq!(picked(&report), (Some(8), Some(64)));
         assert_eq!(tried(&report), vec![8, 16]);
     }
 
@@ -329,7 +344,7 @@ mod tests {
         let rates = HashMap::from([(8, 100.0), (16, 102.0), (4, 90.0)]);
         let space = Space::new(&full(), 460, EngineBackend::Rocm, RX6800XT);
         let report = search_with(&space, &rates, 9);
-        assert_eq!(picked(&report), (Some(8), Some(32)));
+        assert_eq!(picked(&report), (Some(8), Some(64)));
     }
 
     #[test]
@@ -386,24 +401,24 @@ mod tests {
             vec![
                 (Some(1), Some(128)),
                 (Some(2), Some(64)),
-                (Some(4), Some(32)),
-                (Some(8), Some(16)),
-                (Some(16), Some(8))
+                (Some(4), Some(64)),
+                (Some(8), Some(64)),
+                (Some(16), Some(64))
             ]
         );
 
-        // One of the pair pinned: the other follows from the total.
+        // One of the pair pinned: the other follows from the total (with the batch headroom).
         let srv = Space::new(
             &Overrides::parse("numNNServerThreadsPerModel=8"),
             460,
             EngineBackend::Wgpu,
             RX6800XT,
         );
-        assert_eq!(srv.ladder, vec![(None, Some(32))]);
+        assert_eq!(srv.ladder, vec![(None, Some(64))]);
         assert!(srv.is_fixed());
         let report = search_with(&srv, &HashMap::new(), 9);
         assert!(report.history.is_empty(), "nothing is measured");
-        assert_eq!(picked(&report), (None, Some(32)));
+        assert_eq!(picked(&report), (None, Some(64)));
 
         let threads = Space::new(
             &Overrides::parse("numAnalysisThreads=64"),
