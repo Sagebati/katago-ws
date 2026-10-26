@@ -54,7 +54,9 @@ impl Space {
     pub fn new(pinned: &Overrides, depth: usize, backend: EngineBackend) -> Self {
         let pairs: &[(u32, u32)] = match backend {
             EngineBackend::Rocm => &ROCM_SERVER_BATCH,
-            EngineBackend::Wgpu | EngineBackend::Flex => &WGPU_SERVER_BATCH,
+            EngineBackend::Wgpu | EngineBackend::Flex | EngineBackend::Upstream => {
+                &WGPU_SERVER_BATCH
+            }
         };
         let analysis = if pinned.get(ANALYSIS_THREADS).is_some() {
             vec![None]

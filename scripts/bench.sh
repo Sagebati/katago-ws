@@ -26,6 +26,11 @@
 # (wins over the preset), BENCH_CONCURRENCY, BENCH_MAX_VISITS. Requires a
 # release build and scripts/bench_setup.sh.
 #
+# BENCH_BACKEND=upstream runs a stock KataGo binary instead, for comparisons:
+# BENCH_KATAGO defaults to bench/katago-dist/katago and BENCH_MODEL to the
+# .bin.gz of the same net. KataGo's own config picks the GPU: pin its OpenCL
+# device (e.g. openclDeviceToUse=0) as a key=value argument.
+#
 # The startup auto-tune ([engine] autotune) is OFF here by default, so a run
 # measures exactly the config it derives; BENCH_AUTOTUNE=true benchmarks the
 # auto-tuned settings instead (keys passed as env.KATAGO_WS_ENGINE__* with a
@@ -73,14 +78,16 @@ if [[ -z ${BENCH_BACKEND:-} ]]; then
   BENCH_BACKEND=wgpu
   [[ -e ${ROCM_PATH:-/opt/rocm}/lib/libamdhip64.so ]] && BENCH_BACKEND=rocm
 fi
-if [[ $BENCH_BACKEND == flex ]]; then
-  fp16=${BENCH_FP16:-false} model=${BENCH_MODEL:-bench/models/g170e-b10c128.bpk}
-else
-  fp16=${BENCH_FP16:-true} model=${BENCH_MODEL:-bench/models/kata1-b18c384nbt.bpk}
-fi
+katago=${BENCH_KATAGO:-bench/katago-rs}
+case $BENCH_BACKEND in
+  flex)     fp16=${BENCH_FP16:-false} model=${BENCH_MODEL:-bench/models/g170e-b10c128.bpk} ;;
+  upstream) fp16=false model=${BENCH_MODEL:-bench/models/kata1-b18c384nbt.bin.gz}
+            katago=${BENCH_KATAGO:-bench/katago-dist/katago} ;;
+  *)        fp16=${BENCH_FP16:-true} model=${BENCH_MODEL:-bench/models/kata1-b18c384nbt.bpk} ;;
+esac
 
 env RUST_LOG="${RUST_LOG:-info}" \
-  KATAGO_WS_ENGINE__BINARY="${BENCH_KATAGO:-bench/katago-rs}" \
+  KATAGO_WS_ENGINE__BINARY="$katago" \
   KATAGO_WS_ENGINE__BACKEND="$BENCH_BACKEND" \
   KATAGO_WS_ENGINE__FP16="$fp16" \
   KATAGO_WS_ENGINE__CONFIG="$cfg" \

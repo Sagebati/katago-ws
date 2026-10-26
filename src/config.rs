@@ -75,16 +75,36 @@ pub enum EngineBackend {
     Wgpu,
     /// AMD GPUs through ROCm (HIP).
     Rocm,
+    /// Not katago-rs: a stock KataGo binary (no `-backend`, no `burnUseFP16`), for comparisons
+    /// (`scripts/bench.sh` with `BENCH_BACKEND=upstream`). The payload names the engine `katago`.
+    Upstream,
 }
 
 impl EngineBackend {
-    /// The value of katago-rs's `-backend`.
+    /// The backend's name: the value of katago-rs's `-backend` (`upstream` for stock KataGo).
     #[must_use]
     pub fn as_arg(self) -> &'static str {
         match self {
             Self::Flex => "flex",
             Self::Wgpu => "wgpu",
             Self::Rocm => "rocm",
+            Self::Upstream => "upstream",
+        }
+    }
+
+    /// Whether the engine is katago-rs (it takes `-backend` and `burnUseFP16`), not stock KataGo.
+    #[must_use]
+    pub fn is_katago_rs(self) -> bool {
+        self != Self::Upstream
+    }
+
+    /// The payload's `engine.name`.
+    #[must_use]
+    pub fn engine_name(self) -> &'static str {
+        if self.is_katago_rs() {
+            "katago-rs"
+        } else {
+            "katago"
         }
     }
 
@@ -227,7 +247,8 @@ impl EngineConfig {
             .into_iter()
             .filter(|&(_, value)| value > 0)
             .map(|(key, value)| format!("{key}={value}"));
-        let fp16 = self.fp16.then(|| "burnUseFP16=true".to_owned());
+        let fp16 =
+            (self.fp16 && self.backend.is_katago_rs()).then(|| "burnUseFP16=true".to_owned());
         let extra = self
             .override_config
             .split(',')
@@ -450,12 +471,15 @@ mod tests {
             (EngineBackend::Flex, "flex"),
             (EngineBackend::Wgpu, "wgpu"),
             (EngineBackend::Rocm, "rocm"),
+            (EngineBackend::Upstream, "upstream"),
         ] {
             assert_eq!(backend.as_arg(), arg);
             let parsed: EngineBackend = serde_json::from_value(serde_json::json!(arg)).unwrap();
             assert_eq!(parsed, backend);
         }
         assert!(!EngineBackend::Flex.is_gpu() && EngineBackend::Rocm.is_gpu());
+        assert!(EngineBackend::Wgpu.is_katago_rs() && !EngineBackend::Upstream.is_katago_rs());
+        assert_eq!(EngineBackend::Upstream.engine_name(), "katago");
     }
 
     #[test]

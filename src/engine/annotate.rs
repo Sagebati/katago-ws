@@ -744,7 +744,7 @@ pub fn assemble(
         },
         payload_version: PAYLOAD_VERSION,
         engine: EngineInfo {
-            name: "katago-rs",
+            name: cfg.backend.engine_name(),
             version: None,
             model: net_name(&cfg.model),
             max_visits: cfg.max_visits,

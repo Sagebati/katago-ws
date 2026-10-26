@@ -244,7 +244,7 @@ production, not the committed file.
 | `KATAGO_WS_WEB__HOST` / `KATAGO_WS_WEB__PORT` | Bind address (default `0.0.0.0:3000`). |
 | `KATAGO_WS_ENGINE__MAX_VISITS` | Visits per move. **Keep modest (8–50)** so a game finishes inside the lease. |
 | `KATAGO_WS_ENGINE__BINARY` / `__CONFIG` / `__MODEL` | katago-rs paths (the image sets these). The model is a `.bpk` named after a net compiled into the binary. |
-| `KATAGO_WS_ENGINE__BACKEND` / `__FP16` | katago-rs's `-backend` (`flex` = CPU, `wgpu` = Vulkan, `rocm` = HIP; the binary must have it compiled in) and f16 convolutions on a GPU backend (`burnUseFP16`). The image sets these. |
+| `KATAGO_WS_ENGINE__BACKEND` / `__FP16` | katago-rs's `-backend` (`flex` = CPU, `wgpu` = Vulkan, `rocm` = HIP; the binary must have it compiled in; `upstream` = a stock KataGo binary, for benchmark comparisons) and f16 convolutions on a GPU backend (`burnUseFP16`). The image sets these. |
 | `KATAGO_WS_ENGINE__ANALYSIS_THREADS` / `__SEARCH_THREADS_PER_ANALYSIS` | `numAnalysisThreads` × `numSearchThreadsPerAnalysisThread` (default: system threads × `1`, the throughput preset). See [Throughput tuning](#throughput-tuning). |
 | `KATAGO_WS_ENGINE__NN_MAX_BATCH_SIZE` / `__NN_SERVER_THREADS` / `__OVERRIDE_CONFIG` | More engine overrides (`0` / empty = keep `analysis.cfg`). |
 | `KATAGO_WS_ENGINE__AUTOTUNE` / `__AUTOTUNE_MODE` | Startup throughput auto-tune: on by default (`false` = off); `thorough` (default) or `fast` (under ~30 s). See [Throughput tuning](#throughput-tuning). |

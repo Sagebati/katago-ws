@@ -189,7 +189,11 @@ nets as `.bpk`, an OGS game corpus). `just bench LABEL [cfgKey=value …] [env.K
 runs one benchmark against a derived analysis config (`just bench-quick` = 6 games,
 ~1 min, for fast A/B; `just bench-prod` = ~300 games, ~45 min, for final numbers;
 `just bench-models` = one run per model in `bench/models/`); `BENCH_BACKEND` picks the
-backend (default rocm, else wgpu; b18c384nbt in f16 on a GPU, b10c128 on flex).
+backend (default rocm, else wgpu; b18c384nbt in f16 on a GPU, b10c128 on flex), and
+`BENCH_BACKEND=upstream` benchmarks a stock KataGo binary for comparisons
+(`bench/katago-dist/katago` and the `.bin.gz` net by default; [engine] backend `upstream`
+drops `-backend`/`burnUseFP16`). Pin KataGo's OpenCL device (`openclDeviceToUse=0`): it
+otherwise picks Mesa rusticl on AMD.
 `scripts/bench_compare.py BASE.json RUN.json…` tabulates throughput and the per-move
 evaluation drift vs a base run (benchmark the base twice to see the MCTS noise floor).
 The worker is GPU-bound: the Rust side is ~0% CPU, so throughput comes from the engine's

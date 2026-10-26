@@ -82,9 +82,9 @@ pub struct EngineArgs {
     #[arg(long = "visits", value_name = "N")]
     #[serde(skip_serializing_if = "Option::is_none")]
     max_visits: Option<u32>,
-    /// katago-rs compute backend: flex (CPU), wgpu (Vulkan) or rocm (AMD HIP)
-    /// ([engine] backend).
-    #[arg(long, value_name = "BACKEND", value_parser = ["flex", "wgpu", "rocm"])]
+    /// katago-rs compute backend: flex (CPU), wgpu (Vulkan) or rocm (AMD HIP); upstream for a
+    /// stock KataGo binary, for comparisons ([engine] backend).
+    #[arg(long, value_name = "BACKEND", value_parser = ["flex", "wgpu", "rocm", "upstream"])]
     #[serde(skip_serializing_if = "Option::is_none")]
     backend: Option<String>,
     /// Run the GPU network's 3x3 convolutions in f16 ([engine] fp16 = true).
