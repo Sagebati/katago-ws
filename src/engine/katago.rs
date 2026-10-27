@@ -537,8 +537,8 @@ fn engine_args(cfg: &EngineConfig) -> Vec<String> {
     args
 }
 
-/// The analysis-engine version `binary` follows (`KataGo v1.16.5` from
-/// `<binary> version` is `1.16.5`), or `None` when it can't be read.
+/// The analysis-engine version `binary` follows (`KataGo v1.18.2` from
+/// `<binary> version` is `1.18.2`), or `None` when it can't be read.
 pub async fn engine_version(binary: &str) -> Option<String> {
     let out = tokio::process::Command::new(binary)
         .arg("version")

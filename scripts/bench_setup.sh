@@ -22,7 +22,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-version=${KATAGO_VERSION:-v1.16.5}
+version=${KATAGO_VERSION:-v1.18.2}
 rs=$(realpath "${KATAGO_RS:-../katago-rs}")
 games=${BENCH_GAMES:-300}
 if [[ -z ${BENCH_FEATURES:-} ]]; then

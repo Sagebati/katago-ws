@@ -181,7 +181,7 @@ pub struct GameReport {
 pub struct EngineInfo {
     /// Engine name — always `katago-rs`.
     pub name: &'static str,
-    /// The KataGo analysis-engine version katago-rs follows (`1.16.5`), when
+    /// The KataGo analysis-engine version katago-rs follows (`1.18.2`), when
     /// the binary reported one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
