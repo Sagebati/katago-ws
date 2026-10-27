@@ -1,4 +1,6 @@
 /target
+# Local [patch] overrides, e.g. muxa → ../muxa (see Cargo.toml).
+/.cargo/config.toml
 .idea/
 .ai/
 .junie/

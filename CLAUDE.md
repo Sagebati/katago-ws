@@ -13,8 +13,8 @@ annotates every move, and stores the result. Clients read status via `GET
 /analyse/{id}` (optionally long-polling with `?wait=`), list jobs, or tail a live
 SSE feed.
 
-It is a thin **consumer of the local `muxa` framework** (path dep at
-`../muxa/crates/muxa`). Web server, Diesel/Postgres pool, pgmq, OpenTelemetry,
+It is a thin **consumer of the `muxa` framework** (a **git** dep on
+`Sagebati/muxa`, pinned by `rev` in `Cargo.toml`). Web server, Diesel/Postgres pool, pgmq, OpenTelemetry,
 Sentry, OpenAPI, and rate limiting are all muxa plugins composed in
 [`src/main.rs`](src/main.rs); this crate supplies the domain logic (engine, queue,
 job store, HTTP surface). `pgmq` is a **git** dep on the Sagebati fork at the same
@@ -24,8 +24,8 @@ bump the two together. Its `Queue` trait lives at `pgmq::queue::Queue` behind th
 
 ## Commands
 
-Run from the `katago-ws/` directory. The build needs the sibling `../muxa` path-dep
-present (at the `MUXA_REF` in `.github/sibling-refs.env`).
+Run from the `katago-ws/` directory. muxa and pgmq come from git at the revs in
+`Cargo.lock`, so a plain clone builds; no sibling checkout is needed.
 
 ```bash
 # Run (role = first CLI arg; default `standalone`). Needs Postgres — see below.
@@ -59,11 +59,14 @@ The schema is one `jobs` table plus pgmq's own tables in the `pgmq` schema.
 ```bash
 docker compose up --build      # Postgres + the app (katago-rs on CPU + b10 net bundled, no GPU)
 just cpu | just vulkan | just rocm   # build a per-platform image (run from katago-ws/;
-                                     # build context is the PARENT dir for the siblings)
+                                     # build context is the PARENT dir for ../katago-rs)
 ```
 
-If you change the sibling `muxa` framework, it does **not** build standalone —
-validate muxa changes by building/testing through this crate.
+To validate a change to a local `../muxa` through this crate, add an untracked
+(gitignored) `.cargo/config.toml` with
+`[patch."https://github.com/Sagebati/muxa"] muxa = { path = "../muxa/crates/muxa" }`.
+While it is active `Cargo.lock` follows the local checkout — never commit a lockfile
+built that way; push the muxa change and bump `rev` in `Cargo.toml` instead.
 
 ## Architecture
 
@@ -287,17 +290,13 @@ PR / tag+release, config in [`release-plz.toml`](release-plz.toml)) — runs on
 triggers for `GITHUB_TOKEN`-authored pushes and the `v*.*.*` tag it pushes must fire
 `release.yml`.
 
-**The `muxa`/`pgmq`/`katago-rs` sibling pins are one source of truth**:
+**muxa and pgmq are pinned in `Cargo.toml`/`Cargo.lock`** (git `rev`s); bump muxa
+there. **The katago-rs pin is one source of truth**:
 [`.github/sibling-refs.env`](.github/sibling-refs.env), read by
-[`.github/actions/checkout-siblings/`](.github/actions/checkout-siblings/action.yml)
-(used by `ci.yml`, `image.yml`, and `release.yml`'s `build-binary` job — `muxa` used to
-float on `ref: main`, which is why this exists). Bumping `muxa` is a one-line
-change there, not a per-workflow edit. The `pgmq` sibling is still checked out and
-copied into the image build context, but nothing path-depends on it any more (see
-the git dep above); keep `PGMQ_REF` equal to that rev until the checkout is removed.
-The action checks out katago-rs only with `katago-rs: true` (the image builds);
-`ci.yml` doesn't need it (nothing compiles against katago-rs; it is only a
-subprocess). Bump `KATAGO_RS_REF` to ship a new engine.
+[`.github/actions/checkout-siblings/`](.github/actions/checkout-siblings/action.yml),
+which the image builds (`image.yml`, `release.yml`'s `build-push-images`) use to
+check it out next to katago-ws. `ci.yml` doesn't need it (nothing compiles against
+katago-rs; it is only a subprocess). Bump `KATAGO_RS_REF` to ship a new engine.
 
 **The per-variant image settings live only in the [`justfile`](justfile)**
 (`cpu_*` / `vulkan_*` / `rocm_*`: runtime base, packages, AMD apt repo, katago-rs

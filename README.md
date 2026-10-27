@@ -168,8 +168,9 @@ model on all of them or a job's human policy depends on which one took it.
 
 ## Quick start
 
-The build needs the sibling `../muxa` and `../pgmq` path-deps present; running
-an engine role needs a katago-rs binary and its nets (`scripts/bench_setup.sh`
+muxa and pgmq are git dependencies pinned in `Cargo.lock`, so `cargo build` works
+from a plain clone (to build against a local `../muxa`, see the `[patch]` note in
+`Cargo.toml`); running an engine role needs a katago-rs binary and its nets (`scripts/bench_setup.sh`
 builds them from `../katago-rs` into `bench/`).
 
 ```bash
@@ -342,7 +343,7 @@ Compare settings by the rate of `katago_ws.moves.analyzed` on the same set of ga
 ## Building images
 
 One Dockerfile, three katago-rs backends (build context is the **parent** dir so
-the sibling `muxa`/`pgmq`/`katago-rs` checkouts are included; the Dockerfile builds
+the sibling `katago-rs` checkout is included; the Dockerfile builds
 katago-rs and converts its nets from KataGo's `.bin.gz` releases):
 
 ```bash
@@ -355,7 +356,7 @@ just all
 CI ([`.github/workflows/image.yml`](.github/workflows/image.yml)) builds + pushes
 all three to `ghcr.io/sagebati/katago-ws` on every push to `main` (`:latest` = CPU),
 with katago-rs checked out at the ref pinned in `.github/sibling-refs.env`. A host that can't build the Dockerfile (it needs the
-sibling checkouts) just pulls the image.
+sibling katago-rs checkout) just pulls the image.
 
 ## Releases
 

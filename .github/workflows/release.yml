@@ -49,9 +49,6 @@ jobs:
           path: katago-ws
           ref: ${{ inputs.ref }}
 
-      - name: Checkout siblings (muxa, pgmq)
-        uses: ./katago-ws/.github/actions/checkout-siblings
-
       - name: Toolchain sanity (installs the rust-toolchain.toml pin)
         working-directory: katago-ws
         run: rustc --version && cargo --version
@@ -100,11 +97,9 @@ jobs:
           ref: ${{ inputs.ref }}
 
       # The engine is built in the image (engine-build stage) from the pinned
-      # katago-rs; muxa/pgmq come along but aren't used by runtime-prebuilt.
+      # katago-rs.
       - name: Checkout siblings (katago-rs)
         uses: ./katago-ws/.github/actions/checkout-siblings
-        with:
-          katago-rs: true
 
       - uses: actions/download-artifact@v8
         with:
@@ -132,9 +127,8 @@ jobs:
 
       # context is the workspace root (not katago-ws/) — same convention as
       # image.yml — because the Dockerfile's stages copy katago-ws/ and
-      # katago-rs/ relative to that root. The build-binary stage (which needs
-      # the sibling muxa/pgmq checkouts) is never evaluated for the
-      # runtime-prebuilt target.
+      # katago-rs/ relative to that root. The build-binary stage is never
+      # evaluated for the runtime-prebuilt target.
       - name: Build + push ${{ matrix.variant }} image
         uses: docker/build-push-action@v7
         with:

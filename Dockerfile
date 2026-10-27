@@ -11,8 +11,8 @@
 # KataGo's .bin.gz) and loads their weights from the .bpk files the build
 # writes; both happen here, from the nets' public URLs.
 #
-# Build context must be the PARENT directory (contains katago-ws, katago-rs,
-# muxa, pgmq).
+# Build context must be the PARENT directory (contains katago-ws, katago-rs).
+# muxa and pgmq are git deps, fetched by cargo at their Cargo.lock revs.
 
 # syntax=docker/dockerfile:1
 
@@ -56,12 +56,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-COPY pgmq ./pgmq
-COPY muxa ./muxa
 COPY katago-ws ./katago-ws
 
 WORKDIR /build/katago-ws
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/katago-ws/target \
     cargo build --release --locked \
     && cp target/release/katago-ws /usr/local/bin/katago-ws

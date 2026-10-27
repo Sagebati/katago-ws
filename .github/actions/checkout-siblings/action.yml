@@ -1,17 +1,9 @@
 name: checkout-siblings
 description: >
-  Checks out the sibling muxa/pgmq repos this crate path-depends on, at the
-  refs pinned in sibling-refs.env, into ./muxa and ./pgmq relative to the
-  workspace root, and with `katago-rs: true` also the engine repo into
-  ./katago-rs (the image builds need it; the test job doesn't). Run this
-  *after* checking out katago-ws itself (that first checkout can't be wrapped
-  here, since this action lives inside it).
-
-inputs:
-  katago-rs:
-    description: Also check out the engine, katago-rs, into ./katago-rs.
-    required: false
-    default: "false"
+  Checks out the engine, katago-rs, at the ref pinned in sibling-refs.env, into
+  ./katago-rs relative to the workspace root (the image builds compile it).
+  Run this *after* checking out katago-ws itself (that first checkout can't be
+  wrapped here, since this action lives inside it).
 
 runs:
   using: composite
@@ -28,23 +20,8 @@ runs:
       # container's (/__w/...).
       run: grep -v '^\s*#' "$GITHUB_ACTION_PATH/../../sibling-refs.env" | grep -v '^\s*$' >> "$GITHUB_ENV"
 
-    - name: Checkout muxa (sibling build-context crate, pinned)
-      uses: actions/checkout@v7
-      with:
-        repository: ${{ env.MUXA_REPO }}
-        ref: ${{ env.MUXA_REF }}
-        path: muxa
-
-    - name: Checkout pgmq fork (sibling build-context crate, pinned)
-      uses: actions/checkout@v7
-      with:
-        repository: ${{ env.PGMQ_REPO }}
-        ref: ${{ env.PGMQ_REF }}
-        path: pgmq
-
     # Without submodules: the image builds don't read katago-rs's upstream/.
     - name: Checkout katago-rs (the engine, pinned)
-      if: inputs.katago-rs == 'true'
       uses: actions/checkout@v7
       with:
         repository: ${{ env.KATAGO_RS_REPO }}

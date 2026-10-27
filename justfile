@@ -6,8 +6,8 @@
 #   just makefile                       # emit a standalone Makefile for the images
 
 image := "katago-ws"
-# The image build context is the parent dir so the local katago-rs/muxa/pgmq
-# siblings are included.
+# The image build context is the parent dir so the local katago-rs sibling
+# is included.
 ctx   := ".."
 
 # The engine is katago-rs (the sibling repo), built in the image with one compute
