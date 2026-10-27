@@ -920,6 +920,7 @@ dependencies = [
 [[package]]
 name = "diesel-sentry"
 version = "0.1.0"
+source = "git+https://github.com/Sagebati/muxa?rev=a4a6c17974d4205b70e2bd75d517ef1810b723a8#a4a6c17974d4205b70e2bd75d517ef1810b723a8"
 dependencies = [
  "diesel",
  "tracing",
@@ -2060,6 +2061,7 @@ dependencies = [
 [[package]]
 name = "muxa"
 version = "0.1.0"
+source = "git+https://github.com/Sagebati/muxa?rev=a4a6c17974d4205b70e2bd75d517ef1810b723a8#a4a6c17974d4205b70e2bd75d517ef1810b723a8"
 dependencies = [
  "muxa-core",
  "muxa-diesel",
@@ -2073,6 +2075,7 @@ dependencies = [
 [[package]]
 name = "muxa-core"
 version = "0.1.0"
+source = "git+https://github.com/Sagebati/muxa?rev=a4a6c17974d4205b70e2bd75d517ef1810b723a8#a4a6c17974d4205b70e2bd75d517ef1810b723a8"
 dependencies = [
  "axum",
  "dupe",
@@ -2090,6 +2093,7 @@ dependencies = [
 [[package]]
 name = "muxa-diesel"
 version = "0.1.0"
+source = "git+https://github.com/Sagebati/muxa?rev=a4a6c17974d4205b70e2bd75d517ef1810b723a8#a4a6c17974d4205b70e2bd75d517ef1810b723a8"
 dependencies = [
  "bon",
  "diesel",
@@ -2107,6 +2111,7 @@ dependencies = [
 [[package]]
 name = "muxa-openapi"
 version = "0.1.0"
+source = "git+https://github.com/Sagebati/muxa?rev=a4a6c17974d4205b70e2bd75d517ef1810b723a8#a4a6c17974d4205b70e2bd75d517ef1810b723a8"
 dependencies = [
  "aide",
  "axum",
@@ -2120,6 +2125,7 @@ dependencies = [
 [[package]]
 name = "muxa-otel"
 version = "0.1.0"
+source = "git+https://github.com/Sagebati/muxa?rev=a4a6c17974d4205b70e2bd75d517ef1810b723a8#a4a6c17974d4205b70e2bd75d517ef1810b723a8"
 dependencies = [
  "bon",
  "muxa-core",
@@ -2136,6 +2142,7 @@ dependencies = [
 [[package]]
 name = "muxa-pgmq"
 version = "0.1.0"
+source = "git+https://github.com/Sagebati/muxa?rev=a4a6c17974d4205b70e2bd75d517ef1810b723a8#a4a6c17974d4205b70e2bd75d517ef1810b723a8"
 dependencies = [
  "bon",
  "diesel-async",
@@ -2150,6 +2157,7 @@ dependencies = [
 [[package]]
 name = "muxa-sentry"
 version = "0.1.0"
+source = "git+https://github.com/Sagebati/muxa?rev=a4a6c17974d4205b70e2bd75d517ef1810b723a8#a4a6c17974d4205b70e2bd75d517ef1810b723a8"
 dependencies = [
  "axum",
  "bon",
@@ -2165,6 +2173,7 @@ dependencies = [
 [[package]]
 name = "muxa-telemetry"
 version = "0.1.0"
+source = "git+https://github.com/Sagebati/muxa?rev=a4a6c17974d4205b70e2bd75d517ef1810b723a8#a4a6c17974d4205b70e2bd75d517ef1810b723a8"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -2173,6 +2182,7 @@ dependencies = [
 [[package]]
 name = "muxa-web"
 version = "0.1.0"
+source = "git+https://github.com/Sagebati/muxa?rev=a4a6c17974d4205b70e2bd75d517ef1810b723a8#a4a6c17974d4205b70e2bd75d517ef1810b723a8"
 dependencies = [
  "aide",
  "axum",

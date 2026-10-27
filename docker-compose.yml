@@ -20,8 +20,7 @@ services:
 
   app:
     build:
-      # Parent dir so the sibling muxa/pgmq/katago-rs checkouts are in the build
-      # context.
+      # Parent dir so the sibling katago-rs checkout is in the build context.
       context: ..
       dockerfile: katago-ws/Dockerfile
       # `runtime` is the Dockerfile's last (default) stage, so this is

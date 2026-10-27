@@ -1,7 +1,7 @@
 # Build the katago-ws images and push them to GitHub Container Registry (ghcr.io),
 # so a host can pull a ready image instead of building the Dockerfile itself —
-# which it can't, because the build needs the sibling `katago-rs` (the engine),
-# `muxa` + `pgmq` repos as a PARENT context (a one-repo clone doesn't have them).
+# which it can't, because the build needs the sibling `katago-rs` (the engine)
+# repo as a PARENT context (a one-repo clone doesn't have it).
 #
 # One Dockerfile, three katago-rs builds — a matrix, one image per backend,
 # derived from `just print-matrix` (the justfile is the single source of truth
@@ -66,10 +66,8 @@ jobs:
         with:
           path: katago-ws
 
-      - name: Checkout siblings (katago-rs, muxa, pgmq)
+      - name: Checkout siblings (katago-rs)
         uses: ./katago-ws/.github/actions/checkout-siblings
-        with:
-          katago-rs: true
 
       - name: Scope the Docker build context
         run: |

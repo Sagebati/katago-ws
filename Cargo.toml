@@ -2,15 +2,20 @@
 name = "katago-ws"
 version = "0.1.0"
 edition = "2024"
-# Never publishable: path deps on unpublished sibling crates (muxa, pgmq).
+# Never publishable: git deps on unpublished crates (muxa, the pgmq fork).
 # release-plz.toml also sets this per-package; this is belt-and-suspenders so
 # a stray local `cargo publish` fails fast with a clear reason.
 publish = false
 
 [dependencies]
-# muxa framework (local): web + diesel(async pg) + pgmq + otel + sentry + openapi
+# muxa framework: web + diesel(async pg) + pgmq + otel + sentry + openapi
 # + diesel-migrations (MigrationsRunner runs the embedded migrations at startup).
-muxa = { path = "../muxa/crates/muxa", features = [
+# Pinned by git rev, so Cargo.lock records the exact commit. To build against a
+# local ../muxa checkout, add an untracked `.cargo/config.toml` with
+#   [patch."https://github.com/Sagebati/muxa"]
+#   muxa = { path = "../muxa/crates/muxa" }
+# and drop it before committing a Cargo.lock.
+muxa = { git = "https://github.com/Sagebati/muxa", rev = "a4a6c17974d4205b70e2bd75d517ef1810b723a8", features = [
     "web", "ratelimit", "diesel", "diesel-migrations", "diesel-sentry", "pgmq", "sentry", "openapi",
     # OpenTelemetry: OTLP export over gRPC of traces (+ the tracing→OTel bridge),
     # metrics, and logs. Endpoint configured via `[otel].endpoint`.

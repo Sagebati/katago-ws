@@ -1,6 +1,5 @@
-# PR/main-push quality gate: fmt, clippy, tests. Checks out the same pinned
-# muxa/pgmq siblings the image build uses — this crate cannot build standalone
-# (see Cargo.toml path deps, and CLAUDE.md).
+# PR/main-push quality gate: fmt, clippy, tests. muxa and pgmq are git deps
+# pinned in Cargo.lock; nothing here compiles against katago-rs.
 name: ci
 
 on:
@@ -26,9 +25,6 @@ jobs:
         uses: actions/checkout@v7
         with:
           path: katago-ws
-
-      - name: Checkout siblings (muxa, pgmq)
-        uses: ./katago-ws/.github/actions/checkout-siblings
 
       - name: Toolchain sanity (installs the rust-toolchain.toml pin)
         working-directory: katago-ws

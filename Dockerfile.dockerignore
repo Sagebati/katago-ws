@@ -1,12 +1,10 @@
-# Build context is the PARENT dir (contains katago-ws, katago-rs, muxa, pgmq).
-# Ignore everything, then re-include only the four repos we build from, minus
+# Build context is the PARENT dir (contains katago-ws, katago-rs).
+# Ignore everything, then re-include only the two repos we build from, minus
 # their heavy build/VCS artifacts.
 *
 
 !katago-ws
 !katago-rs
-!muxa
-!pgmq
 
 **/target
 **/.git
