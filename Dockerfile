@@ -35,7 +35,7 @@ ARG ENGINE_MODEL=g170e-b10c128.bpk
 ARG NET_B10_URL=https://katagoarchive.org/g170/neuralnets/g170e-b10c128-s1141046784-d204142634.bin.gz
 ARG NET_B18_URL=https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b18c384nbt-s9996604416-d4316597426.bin.gz
 ARG NET_HUMAN_URL=https://github.com/lightvector/KataGo/releases/download/v1.15.0/b18c384nbt-humanv0.bin.gz
-ARG CONFIG_URL=https://raw.githubusercontent.com/lightvector/KataGo/v1.16.5/cpp/configs/analysis_example.cfg
+ARG CONFIG_URL=https://raw.githubusercontent.com/lightvector/KataGo/v1.18.2/cpp/configs/analysis_example.cfg
 
 ###############################################################################
 # Stage 1 — build the Rust binary (glibc / Debian)

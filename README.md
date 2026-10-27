@@ -131,7 +131,7 @@ top-left (A19 → T1), and all-or-nothing: present for every turn or absent.
 | `moves[].top_moves[].human_prior` | v3 | human policy of the candidate; only with `human_policy` |
 | `engine.ownership_stdev` / `engine.policy` | v3 | whether those grids are present |
 | `engine.human_model` | v3 | the human SL network's name (`b18c384nbt-humanv0`), when `human_policy` is present |
-| `engine.name` / `engine.version` / `engine.model` | v3 | `katago-rs`, the KataGo version its analysis engine matches (e.g. `1.16.5`), and the net (`kata1-b18c384nbt`) |
+| `engine.name` / `engine.version` / `engine.model` | v3 | `katago-rs`, the KataGo version its analysis engine matches (e.g. `1.18.2`), and the net (`kata1-b18c384nbt`) |
 
 Principal variations (`top_moves[].pv`) run to 15 moves by default
 (`[engine] analysis_pv_len`), bounded by how deep the search went. A 325-move
