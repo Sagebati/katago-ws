@@ -248,7 +248,7 @@ production, not the committed file.
 | `KATAGO_WS_ENGINE__BACKEND` / `__FP16` | katago-rs's `-backend` (`flex` = CPU, `wgpu` = Vulkan, `rocm` = HIP; the binary must have it compiled in; `upstream` = a stock KataGo binary, for benchmark comparisons) and f16 convolutions on a GPU backend (`burnUseFP16`). The image sets these. |
 | `KATAGO_WS_ENGINE__ANALYSIS_THREADS` / `__SEARCH_THREADS_PER_ANALYSIS` | `numAnalysisThreads` × `numSearchThreadsPerAnalysisThread` (default: system threads × `1`, the throughput preset). See [Throughput tuning](#throughput-tuning). |
 | `KATAGO_WS_ENGINE__NN_MAX_BATCH_SIZE` / `__NN_SERVER_THREADS` / `__OVERRIDE_CONFIG` | More engine overrides (`0` / empty = keep `analysis.cfg`). |
-| `KATAGO_WS_ENGINE__AUTOTUNE` / `__AUTOTUNE_MODE` | Startup throughput auto-tune: on by default (`false` = off); `thorough` (default) or `fast` (under ~30 s). See [Throughput tuning](#throughput-tuning). |
+| `KATAGO_WS_ENGINE__AUTOTUNE` / `__AUTOTUNE_MODE` | Startup throughput auto-tune: on by default (`false` = off); `thorough` (default) or `fast` (two or three trials, ~35–45 s on b18). See [Throughput tuning](#throughput-tuning). |
 | `KATAGO_WS_ENGINE__HUMAN_MODEL` | Human SL network (`-human-model`, a `.bpk`); empty (default) = none. See [Human policy](#human-policy). |
 | `KATAGO_WS_ENGINE__INCLUDE_OWNERSHIP_STDEV` / `__INCLUDE_POLICY` / `__ANALYSIS_PV_LEN` | Payload contents: the `ownership_stdev` and `policy` grids (default `true`) and PV length (default `15`). |
 | `KATAGO_WS_ENGINE__SCREEN_VISITS` | Two-pass analysis: screen every move at this many visits, re-search only the swings at `MAX_VISITS` (default `0` = off). |
@@ -305,8 +305,10 @@ Grafana/Prometheus dashboards.
 measures a few `numNNServerThreadsPerModel` × `nnMaxBatchSize` /
 `numAnalysisThreads` settings on this GPU with short trials and caches the winner
 in `~/.katago/katago-ws-autotune.json` (keyed by GPU, binary, model, backend and
-precision), so only the first start pays for it (a few minutes, or under ~30 s
-with `KATAGO_WS_ENGINE__AUTOTUNE_MODE=fast`). On an RX 6800 XT with ROCm and
+precision), so only the first start pays for it (~1.5–2 min, or ~35–45 s
+with `KATAGO_WS_ENGINE__AUTOTUNE_MODE=fast`; trials search each position to
+`KATAGO_WS_ENGINE__AUTOTUNE_VISITS`, 16, so a wave of positions finishes in
+seconds). On an RX 6800 XT with ROCm and
 b18c384nbt it picks 8 × 64 with 256 analysis threads. Settings you give
 explicitly are kept and only the rest are tuned; `KATAGO_WS_ENGINE__AUTOTUNE=false`
 turns it off, and the CPU backend skips it. `katago-ws autotune [--fast] [--force]`

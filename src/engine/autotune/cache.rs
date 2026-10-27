@@ -16,7 +16,8 @@ use super::search::Outcome;
 
 /// Bump when the tuning procedure changes enough to invalidate old results.
 /// 4: katago-rs (backend and precision in the key, no OpenCL device probe).
-const TUNER_VERSION: u32 = 4;
+/// 5: trials at `autotune_visits`, not `max_visits`.
+const TUNER_VERSION: u32 = 5;
 
 /// Environment variables that change which devices/runtimes the engine sees.
 const DEVICE_ENV: [&str; 7] = [

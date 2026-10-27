@@ -61,7 +61,7 @@ pub enum Role {
     Healthcheck,
     /// Auto-tune the engine's throughput settings into the cache, then exit.
     Autotune {
-        /// The under-30 s search instead of `[engine] autotune_mode`.
+        /// The fast search (two or three trials) instead of `[engine] autotune_mode`.
         #[arg(long)]
         fast: bool,
         /// Re-tune even when a cached result exists.
