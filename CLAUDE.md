@@ -35,7 +35,8 @@ cargo run -- worker            # engine + cluster client, no Postgres
 cargo run --release -- bench   # engine only: throughput benchmark, then exit
 
 cargo build                    # CI/Docker use `cargo build --release --locked`
-cargo clippy                   # lints are enforced — see Conventions
+just check                     # the CI gate: fmt --check + `just lint` + `just test`
+just lint                      # = cargo clippy --all-targets -- -D warnings (see Conventions)
 just test                      # = cargo nextest run  (install: cargo install cargo-nextest --locked)
 just test sgf                  # filter; `just test --no-capture` to see output
 cargo test                     # works too (single package, no workspace here)

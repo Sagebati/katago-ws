@@ -225,8 +225,9 @@ orchestrator runs without auth, so no `KATAGO_WS_WORKER__AUTH_TOKEN` is needed â
 first, since plain `ws://` would send the token in cleartext.
 
 ```bash
+just check           # what CI runs: cargo fmt --check, clippy -D warnings, nextest
 just test            # cargo nextest run  (cargo test works too)
-cargo clippy         # lints are enforced
+just lint            # cargo clippy --all-targets -D warnings; lints are enforced
 ```
 
 ## Configuration
