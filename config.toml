@@ -95,7 +95,8 @@ model = "g170e-b10c128.bpk"
 # here or via env (as is any key in override_config); only the rest are tuned.
 # Any failure falls back to the config as given.
 # autotune = true                    # KATAGO_WS_ENGINE__AUTOTUNE=false disables it
-# autotune_mode = "thorough"         # or "fast": under ~30 s, guided by GPU size + backend
+# autotune_mode = "thorough"         # or "fast": two or three trials, guided by GPU size + backend
+# autotune_visits = 16               # visits per position in a trial (0 = max_visits)
 # autotune_cache = ""                # "" = ~/.katago/katago-ws-autotune.json
 # autotune_timeout_secs = 300        # incl. the GPU kernels' first-use compile
 # One-shot, outside any role: `katago-ws autotune [--fast] [--force]`.

@@ -21,7 +21,7 @@
 //!   exits 0 or 1; the images' Docker `HEALTHCHECK` (see [`healthcheck`]).
 //! - `autotune [--fast] [--force]` — run KataGo's throughput auto-tune once
 //!   (see [`engine::autotune`]), write the cache, log the settings, exit. The
-//!   engine roles then start from the cache. `--fast` = the under-30 s search;
+//!   engine roles then start from the cache. `--fast` = the two-or-three-trial search;
 //!   `--force` re-tunes even when a cached result exists.
 //!
 //! The engine roles also take flags for the common `[engine]` / `[worker]` keys

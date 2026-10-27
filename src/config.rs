@@ -63,6 +63,9 @@ fn default_refine_score_delta() -> f32 {
 fn default_autotune_timeout() -> u64 {
     300
 }
+fn default_autotune_visits() -> u32 {
+    16
+}
 
 /// katago-rs's compute backend (`-backend`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -213,6 +216,11 @@ pub struct EngineConfig {
     /// minutes on a GPU) or `fast` (from the backend's usual winner, a few
     /// trials). `katago-ws autotune --fast` runs the latter once and exits.
     pub autotune_mode: AutotuneMode,
+    /// Visits per position in a tune trial (capped by `max_visits`; `0` =
+    /// `max_visits`). Shallow trials rank the candidates as production's
+    /// visits do, while a wave of 256 positions finishes in seconds rather
+    /// than the minute or more b18 takes at 500 visits.
+    pub autotune_visits: u32,
     /// Where the auto-tune result is cached. Empty =
     /// `~/.katago/katago-ws-autotune.json`: persist `~/.katago` in a container
     /// volume to keep it across restarts.
@@ -292,6 +300,7 @@ impl Default for EngineConfig {
             refine_score_delta: default_refine_score_delta(),
             autotune: true,
             autotune_mode: AutotuneMode::default(),
+            autotune_visits: default_autotune_visits(),
             autotune_cache: String::new(),
             autotune_timeout_secs: default_autotune_timeout(),
         }

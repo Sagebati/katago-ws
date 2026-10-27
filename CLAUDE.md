@@ -211,15 +211,17 @@ Every role that launches the engine (`standalone`, `worker`, `bench`) first runs
 [`engine::autotune`](src/engine/autotune/mod.rs) from `KataGoEnginePlugin`
 (whose `read_config` also reads `[worker].concurrency` and which tuning fields
 were set explicitly). Each candidate is a fresh katago-rs fed an embedded 17-game
-corpus in 16-turn chunks at the queue depth of `[worker].concurrency` games;
-positions/s is read off a turn counter after a warm-up wave. It picks
+corpus in 16-turn chunks at the queue depth of `[worker].concurrency` games,
+each position searched to `[engine] autotune_visits` (16; production's
+`max_visits` made a b18 wave take minutes); positions/s is read off a turn
+counter after a warm-up wave. It picks
 `nn_server_threads` × `nn_max_batch_size` (candidate order from `[engine] backend`:
 rocm's usual winner is 8×64, wgpu's 4×64) and `analysis_threads`;
 `search_threads_per_analysis` is 1. The CPU backend (flex) skips it.
 - **Modes** (`[engine] autotune_mode`): `thorough` (default,
   [`thorough.rs`](src/engine/autotune/thorough.rs): every server×batch
-  candidate, then 256/128/512 analysis threads, near-ties re-measured; ~1–1.5 min)
-  or `fast` ([`fast.rs`](src/engine/autotune/fast.rs), under ~30 s: positions in
+  candidate, then 256/128/512 analysis threads, near-ties re-measured; ~1.5–2 min on b18)
+  or `fast` ([`fast.rs`](src/engine/autotune/fast.rs), ~35–45 s on b18: positions in
   flight from the GPU's SIMD lanes — AMD KFD topology, else `clinfo` — capped by
   the queue depth; only the server-thread split is searched, on a 1/2/4/8/16
   ladder, from the backend's usual winner; two trials,

@@ -1,6 +1,6 @@
 //! Startup throughput auto-tune for the analysis engine (katago-rs).
 //!
-//! Throughput at a fixed `max_visits` is decided by a few startup settings
+//! Throughput is decided by a few startup settings
 //! whose best values depend on the GPU, its driver and the backend (`rocm`,
 //! `wgpu`), so they are measured, not hardcoded:
 //!
@@ -17,8 +17,13 @@
 //! an embedded 17-game corpus in 16-turn queries that keep the queue as deep as
 //! `[worker].concurrency` games in flight would (≈ 230 positions each) —
 //! without a finishing game's drain, which makes whole-game measurements
-//! noisy. Throughput is read off a turn-level counter after one wave of
-//! warm-up, so neither process startup nor the first-use GPU kernel
+//! noisy. Trials search each position to `[engine] autotune_visits` (16), not
+//! production's `max_visits`: every analysis thread starts together, so
+//! nothing completes until a whole wave has, and at 500 visits a b18 wave of
+//! 256 positions is a minute or more. The candidates rank the same shallow
+//! (RX 6800 XT, Vulkan: 4 servers beat 8 by ~15% at 500 visits, and by
+//! 10–15% at 16). Throughput is read off a turn-level counter after one wave
+//! of warm-up, so neither process startup nor the first-use GPU kernel
 //! compilation is charged to a candidate. Clearly losing candidates are stopped
 //! half-way, near-ties are re-measured, and within 2% the higher-prior
 //! candidate wins. The winning keys are cached (see [`cache`]) so later starts
@@ -90,7 +95,8 @@ const POSITIONS_PER_GAME: usize = 230;
 
 /// Positions in a trial's measured window: ~2.5 completion waves at 256
 /// analysis threads (all of a wave's positions finish at about the same
-/// time). Measured on an RX 6800 XT, b10: ±2–5% run to run.
+/// time). Measured on an RX 6800 XT, b18 at 16 visits: ~9 s, ±5–8% run to
+/// run; shorter windows were too noisy to rank candidates 10–15% apart.
 const WINDOW_POSITIONS: u64 = 640;
 /// A trial's measured window never runs longer than this (slow GPUs measure
 /// fewer positions instead of blowing the budget).
@@ -282,10 +288,11 @@ fn with_tuned(mut cfg: EngineConfig, explicit: &[&str], tuned: &Overrides) -> En
 }
 
 /// `cfg` launched with exactly `over` as `-override-config` (the four
-/// `[engine]` tuning fields zeroed so their defaults don't join in), and
-/// without the human model.
+/// `[engine]` tuning fields zeroed so their defaults don't join in), at the
+/// trial's visits, and without the human model.
 fn launch_cfg(cfg: &EngineConfig, over: &Overrides) -> EngineConfig {
     EngineConfig {
+        max_visits: trial_visits(cfg),
         analysis_threads: 0,
         search_threads_per_analysis: 0,
         nn_server_threads: 0,
@@ -295,6 +302,15 @@ fn launch_cfg(cfg: &EngineConfig, over: &Overrides) -> EngineConfig {
         // cost load time and VRAM.
         human_model: String::new(),
         ..cfg.clone()
+    }
+}
+
+/// Visits per position in a trial: `[engine] autotune_visits`, never more
+/// than production's `max_visits` (`0` = `max_visits`).
+fn trial_visits(cfg: &EngineConfig) -> u32 {
+    match cfg.autotune_visits {
+        0 => cfg.max_visits,
+        visits => visits.min(cfg.max_visits),
     }
 }
 
@@ -310,7 +326,11 @@ enum Tuned {
 
 async fn tune(cfg: &EngineConfig, pinned: &Overrides, concurrency: usize) -> Result<Tuned, String> {
     let backend = cfg.backend;
-    tracing::info!(backend = backend.as_arg(), "autotune: engine backend");
+    tracing::info!(
+        backend = backend.as_arg(),
+        trial_visits = trial_visits(cfg),
+        "autotune: engine backend"
+    );
 
     let depth = concurrency * POSITIONS_PER_GAME;
     let clock = Instant::now();
@@ -332,6 +352,12 @@ async fn tune(cfg: &EngineConfig, pinned: &Overrides, concurrency: usize) -> Res
         let started = Instant::now();
         let (outcome, startup) = run_trial(cfg, &over, concurrency, warmup, prune_below).await;
         let mut wall = started.elapsed();
+        tracing::debug!(
+            candidate = %cand,
+            secs = wall.as_secs_f64(),
+            first_position_secs = startup.map(|took| took.as_secs_f64()),
+            "autotune: trial timing"
+        );
         if forgiven.get().is_none() {
             let extra = startup.unwrap_or_default().saturating_sub(SLOW_START);
             forgiven.set(Some(extra));
@@ -565,6 +591,19 @@ mod tests {
             })
             .sum();
         assert!(positions > 3_000, "{positions} positions");
+    }
+
+    #[test]
+    fn trials_run_at_the_autotune_visits_never_above_max_visits() {
+        let cfg = |max_visits, autotune_visits| EngineConfig {
+            max_visits,
+            autotune_visits,
+            ..EngineConfig::default()
+        };
+        let over = Overrides::default();
+        assert_eq!(launch_cfg(&cfg(500, 16), &over).max_visits, 16);
+        assert_eq!(launch_cfg(&cfg(10, 16), &over).max_visits, 10);
+        assert_eq!(launch_cfg(&cfg(500, 0), &over).max_visits, 500);
     }
 
     #[test]
