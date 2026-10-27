@@ -1,10 +1,13 @@
-# katago-ws image builds. Run from this directory (katago-ws/).
-# Build context is the parent dir so the local katago-rs/muxa/pgmq siblings are included.
+# katago-ws. Run from this directory (katago-ws/).
 #
-#   just cpu | just vulkan | just rocm | just all
-#   just makefile      # emit a standalone Makefile equivalent
+#   just check                          # what CI runs: fmt, clippy, nextest
+#   just autotune | just bench LABEL    # the engine on this host
+#   just cpu | just vulkan | just rocm  # images
+#   just makefile                       # emit a standalone Makefile for the images
 
 image := "katago-ws"
+# The image build context is the parent dir so the local katago-rs/muxa/pgmq
+# siblings are included.
 ctx   := ".."
 
 # The engine is katago-rs (the sibling repo), built in the image with one compute
@@ -54,29 +57,57 @@ rocm_model    := "kata1-b18c384nbt.bpk"
 
 # List recipes.
 default:
-    @just --list
+    @just --list --unsorted
 
-# Run the test suite with cargo-nextest (https://nexte.st).
-# Install once with: cargo install cargo-nextest --locked
+# ---------------------------------------------------------------------------
+# Checks — the same three steps as .github/workflows/ci.yml.
+# ---------------------------------------------------------------------------
+
+# Format the sources.
+fmt:
+    cargo fmt
+
+# Clippy with warnings as errors, as CI runs it.
+lint:
+    cargo clippy --all-targets -- -D warnings
+
 # Pass filters/flags through, e.g. `just test sgf` or `just test --no-capture`.
+# Install cargo-nextest (https://nexte.st) once with:
+#   cargo install cargo-nextest --locked
+
+# Run the test suite with cargo-nextest.
 test *ARGS:
     cargo nextest run {{ARGS}}
 
-# Benchmark the engine: one labelled run of the `bench` role (17 games).
+# The CI gate: formatting, clippy, tests.
+check:
+    cargo fmt --check
+    @just lint
+    @just test
+    @echo "✔ katago-ws checks passed"
+
+# ---------------------------------------------------------------------------
+# The engine on this host: auto-tune and benchmarks
+# ---------------------------------------------------------------------------
+
+# `just autotune --fast` = the few-trial search; --force re-tunes over a cached
+# result. Uses [engine] from config.toml / the env; the engine roles start from
+# the cache it writes.
+
+# Auto-tune the engine for this host into the cache, then exit.
+autotune *ARGS:
+    cargo build --release
+    ./target/release/katago-ws autotune {{ARGS}}
+
 # One-time setup: scripts/bench_setup.sh (katago-rs build + nets, SGF corpus → bench/).
 # Args are engine config overrides or env.KATAGO_WS_*=… — see scripts/bench.sh, e.g.
 #   just bench t256 numAnalysisThreads=256 numSearchThreadsPerAnalysisThread=1
 # Compare runs: scripts/bench_compare.py bench/results/BASE.json bench/results/*.json
+
+# Benchmark the engine: one labelled run of the `bench` role (17 games).
 bench LABEL *ARGS:
     cargo build --release
     scripts/bench.sh {{LABEL}} {{ARGS}}
-
-# Auto-tune the engine for this host into the cache, then exit (the engine roles
-# start from it). `just autotune --fast` = the few-trial search; --force
-# re-tunes over a cached result. Uses [engine] from config.toml / the env.
-autotune *ARGS:
-    cargo build --release
-    ./target/release/katago-ws autotune {{ARGS}}
 
 # Quick bench: 6 games, ~1 min — for fast A/B checks (compare quick with quick).
 bench-quick LABEL *ARGS:
@@ -93,7 +124,11 @@ bench-models PREFIX *ARGS:
     cargo build --release
     scripts/bench_models.sh {{PREFIX}} {{ARGS}}
 
-# One image: `just image cpu` is `just cpu`.
+# ---------------------------------------------------------------------------
+# Images
+# ---------------------------------------------------------------------------
+
+# One image; `just cpu`, `just vulkan` and `just rocm` call it.
 [private]
 build variant base pkgs features backend fp16 model key_url="" repo="":
     DOCKER_BUILDKIT=1 docker build -f Dockerfile -t {{image}}:{{variant}} \
@@ -119,16 +154,17 @@ rocm: (build "rocm" rocm_base rocm_pkgs rocm_features rocm_backend rocm_fp16 roc
 # Build all three.
 all: cpu vulkan rocm
 
-# Emit the CI build matrix as JSON: {"include":[{variant,base,pkgs,features,backend,fp16,model,key_url,repo}...]}.
 # Consumed by .github/workflows/{image,release}.yml via fromJson() so the
 # variants never need a second, independently-maintained copy in YAML.
+
+# Emit the CI build matrix as JSON: {"include":[{variant,base,pkgs,features,backend,fp16,model,key_url,repo}...]}.
 print-matrix:
     @printf '{"include":[%s,%s,%s]}\n' \
       '{"variant":"cpu","base":"{{cpu_base}}","pkgs":"{{cpu_pkgs}}","features":"{{cpu_features}}","backend":"{{cpu_backend}}","fp16":"{{cpu_fp16}}","model":"{{cpu_model}}","key_url":"","repo":""}' \
       '{"variant":"vulkan","base":"{{vulkan_base}}","pkgs":"{{vulkan_pkgs}}","features":"{{vulkan_features}}","backend":"{{vulkan_backend}}","fp16":"{{vulkan_fp16}}","model":"{{vulkan_model}}","key_url":"","repo":""}' \
       '{"variant":"rocm","base":"{{rocm_base}}","pkgs":"{{rocm_pkgs}}","features":"{{rocm_features}}","backend":"{{rocm_backend}}","fp16":"{{rocm_fp16}}","model":"{{rocm_model}}","key_url":"{{rocm_key_url}}","repo":"{{rocm_repo}}"}'
 
-# Compile this justfile into a standalone Makefile (runs without `just`).
+# Compile the image recipes into a standalone Makefile (runs without `just`).
 makefile:
     #!/usr/bin/env bash
     set -euo pipefail
